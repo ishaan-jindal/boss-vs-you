@@ -5,14 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Boss vs You</title>
+<meta name="theme-color" content="#14100c">
+<title>Boss vs You — a tiny boss-battler</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/lib/phaser.min.js"></script>
 </head>
 <body>
 <div id="game-root" class="bv-root"></div>
+
+<!-- DOM juice layers (game.js toggles these; all optional, guarded) -->
+<div id="bv-vignette" aria-hidden="true"></div>
+<div id="bv-flash" aria-hidden="true"></div>
+<div id="bv-banner" role="status" aria-live="assertive" aria-hidden="true">
+  <span id="bv-banner-kicker"></span>
+  <span id="bv-banner-title"></span>
+  <span id="bv-banner-sub"></span>
+</div>
+
 <div id="rotate-hint">Tip: landscape gives you more dodging room.</div>
 <div id="taunt-region" class="bv-taunt" role="status" aria-live="polite"></div>
+<noscript><p class="bv-noscript">Boss vs You needs JavaScript to fight. Turn it on and come back swinging.</p></noscript>
 <script src="/static/game.js"></script>
 </body>
 </html>

@@ -1,27 +1,152 @@
-/* FUNCTIONAL ONLY — layout that works at 390/768/1440px. No visual design. */
+/* BOSS vs YOU — bold arcade storybook.
+ * Lantern-paper warmth + high-contrast danger. No build, no CDN, no webfonts.
+ * System stacks only; icons are text glyphs + inline Phaser shapes, never emoji.
+ */
+
+:root {
+  --paper: #f5e6c8;
+  --paper-dim: #d9c49a;
+  --ink: #17110b;
+  --night: #14100c;
+  --night-2: #1e1610;
+  --gold: #ffd75e;
+  --gold-deep: #c9962e;
+  --hero: #4da3ff;
+  --danger: #e8322a;
+  --danger-deep: #8f140e;
+  --moss: #3fa34d;
+  --smoke: #8a6bc9;
+  --ember: #e0572b;
+  --ok: #7cff6b;
+  --panel: #211812;
+  --line: #4a3a28;
+  --sat: env(safe-area-inset-top, 0px);
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
 * { box-sizing: border-box; }
 html, body {
   margin: 0; padding: 0; height: 100%;
-  background: #111; color: #eee;
-  font-family: system-ui, -apple-system, sans-serif;
+  background:
+    radial-gradient(120% 90% at 50% -10%, #2b1f14 0%, var(--night) 55%, #0b0806 100%);
+  color: var(--paper);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+    "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
   overscroll-behavior: none;
   touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
 }
-#game-root {
+
+/* Paper-grain over everything: repeating arcs + dots, zero images. */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  opacity: .5;
+  background-image:
+    radial-gradient(rgba(245, 230, 200, .055) 1px, transparent 1.4px),
+    radial-gradient(rgba(245, 230, 200, .03) 1px, transparent 1.6px);
+  background-size: 26px 26px, 41px 41px;
+  background-position: 0 0, 13px 17px;
+}
+
+#game-root, .bv-root {
   position: fixed; inset: 0;
-  padding: env(safe-area-inset-top) env(safe-area-inset-right)
-           env(safe-area-inset-bottom) env(safe-area-inset-left);
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
   display: flex; align-items: stretch; justify-content: stretch;
+  z-index: 2;
 }
-#game-root canvas { width: 100% !important; height: 100% !important; object-fit: contain; }
-#taunt-region {
+#game-root canvas {
+  width: 100% !important; height: 100% !important; object-fit: contain;
+  display: block;
+}
+/* Visible keyboard focus on the canvas + any DOM fallback buttons. */
+#game-root canvas:focus-visible {
+  outline: 3px solid var(--gold);
+  outline-offset: -3px;
+}
+#game-root:focus-visible { outline: 3px solid var(--gold); outline-offset: -3px; }
+
+/* Screen-reader live region: visually hidden but present (hook preserved). */
+#taunt-region, .bv-taunt {
   position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; overflow: hidden;
 }
+
+/* ---- DOM juice layers ---- */
+#bv-vignette {
+  position: fixed; inset: 0; z-index: 3; pointer-events: none;
+  opacity: 0; transition: opacity .45s ease;
+  background: radial-gradient(115% 100% at 50% 45%, transparent 52%, rgba(143, 20, 14, .55) 100%);
+}
+#bv-vignette.on { opacity: 1; }
+#bv-vignette.brief { animation: bv-vin-pulse .8s ease 2; }
+@keyframes bv-vin-pulse { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+
+#bv-flash {
+  position: fixed; inset: 0; z-index: 4; pointer-events: none; opacity: 0;
+  background: radial-gradient(100% 100% at 50% 50%, rgba(255, 215, 94, .28), rgba(232, 50, 42, .34));
+}
+#bv-flash.hit { animation: bv-flash-hit .22s ease-out; }
+@keyframes bv-flash-hit { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+#bv-banner {
+  position: fixed; z-index: 5; pointer-events: none;
+  left: 50%; top: 34%; transform: translate(-50%, -50%) rotate(-2deg) scale(.9);
+  min-width: min(560px, 86vw); max-width: 92vw;
+  text-align: center; padding: 14px 28px 16px;
+  background: var(--ink); color: var(--paper);
+  border: 3px solid var(--danger);
+  box-shadow: 0 0 0 3px var(--ink), 0 0 44px rgba(232, 50, 42, .65), 0 14px 40px rgba(0,0,0,.6);
+  opacity: 0;
+}
+#bv-banner.show { animation: bv-banner-in 2.2s ease forwards; }
+#bv-banner-kicker {
+  display: block; font-size: 13px; letter-spacing: .35em; font-weight: 700;
+  color: var(--danger); text-transform: uppercase;
+}
+#bv-banner-title {
+  display: block; font-weight: 900; font-size: clamp(30px, 6vw, 52px);
+  letter-spacing: .04em; color: var(--gold);
+  text-shadow: 2px 2px 0 var(--danger-deep), -1px -1px 0 #000;
+}
+#bv-banner-sub {
+  display: block; font-size: clamp(13px, 2.4vw, 17px); font-style: italic; color: var(--paper-dim);
+}
+@keyframes bv-banner-in {
+  0% { opacity: 0; transform: translate(-50%, -50%) rotate(-2deg) scale(.7); }
+  12% { opacity: 1; transform: translate(-50%, -50%) rotate(-2deg) scale(1.06); }
+  22% { transform: translate(-50%, -50%) rotate(-2deg) scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -56%) rotate(-2deg) scale(1); }
+}
+
 #rotate-hint { display: none; }
-@media (orientation: portrait) and (max-width: 500px) {
+@media (orientation: portrait) and (max-width: 560px) {
   #rotate-hint {
-    display: block; position: fixed; top: env(safe-area-inset-top);
-    width: 100%; text-align: center; font-size: 13px; opacity: .8;
-    pointer-events: none; z-index: 10;
+    display: block; position: fixed; z-index: 10; pointer-events: none;
+    top: var(--sat); left: 0; width: 100%; text-align: center;
+    font-size: 13px; letter-spacing: .04em; color: var(--paper-dim);
+    background: rgba(20, 16, 12, .82); border-bottom: 2px solid var(--line);
+    padding: 8px 12px 9px;
   }
+}
+
+.bv-noscript {
+  position: fixed; z-index: 20; left: 50%; top: 40%; transform: translate(-50%, -50%);
+  background: var(--panel); border: 2px solid var(--gold); padding: 20px 26px; max-width: 88vw;
+}
+
+/* Focus visibility for any DOM text buttons (menu fallback / error state). */
+#game-root p:focus-visible, #game-root button:focus-visible {
+  outline: 3px solid var(--gold); outline-offset: 3px;
+}
+
+/* Reduced motion: kill every DOM animation. Canvas shake/flash is gated in JS. */
+@media (prefers-reduced-motion: reduce) {
+  #bv-vignette { transition: none; }
+  #bv-vignette.brief { animation: none; opacity: 1; }
+  #bv-flash.hit { animation: none; opacity: 0; }
+  #bv-banner.show { animation: none; opacity: 1; transform: translate(-50%, -50%) rotate(0) scale(1); }
+  body::before { display: none; }
 }
