@@ -26,6 +26,10 @@ GEMINI_URL = (
 )
 DEEPINFRA_URL = "https://api.deepinfra.com/v1/openai/chat/completions"
 
+# Last-call token accounting, overwritten on every Gemini call. Exists so
+# latency can be attributed (reasoning vs queue) without a debugger.
+LAST_USAGE: dict = {}
+
 
 class BrainFields(BaseModel):
     tactic_id: str
@@ -75,12 +79,29 @@ async def call_gemini(prompt: str) -> BrainFields:
     key = os.environ.get("GEMINI_API_KEY", "")
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            # Gemma 4 thinks by default; undisabled, short replies take 20-40s.
+            # Nested path + MINIMAL are both load-bearing: a direct
+            # thinkingLevel is an unknown field, and LOW/MEDIUM are invalid
+            # enum values on this model (misleading 400s either way).
+            "thinkingConfig": {"thinkingLevel": "MINIMAL"},
+        },
     }
     async with SEMAPHORE:
         resp = await _post(f"{GEMINI_URL}?key={key}", {}, body)
     resp.raise_for_status()
     data = resp.json()
+    # Diagnostic for latency work: thoughtsTokenCount present-and-large means
+    # the model is still reasoning; absent/0 means time went to queue/prefill.
+    usage = data.get("usageMetadata", {})
+    LAST_USAGE.update(
+        {
+            "thoughts": usage.get("thoughtsTokenCount", 0),
+            "candidates": usage.get("candidatesTokenCount", 0),
+            "prompt": usage.get("promptTokenCount", 0),
+        }
+    )
     text = data["candidates"][0]["content"]["parts"][0]["text"]
     return parse_fields(text)
 
