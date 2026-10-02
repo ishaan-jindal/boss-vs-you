@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: boss-vs-you
+    runtime: docker
+    plan: standard  # 1 CPU / 2 GB RAM
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: DEEPINFRA_API_KEY
+        sync: false

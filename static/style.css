@@ -1,0 +1,27 @@
+/* FUNCTIONAL ONLY — layout that works at 390/768/1440px. No visual design. */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: #111; color: #eee;
+  font-family: system-ui, -apple-system, sans-serif;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+#game-root {
+  position: fixed; inset: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+           env(safe-area-inset-bottom) env(safe-area-inset-left);
+  display: flex; align-items: stretch; justify-content: stretch;
+}
+#game-root canvas { width: 100% !important; height: 100% !important; object-fit: contain; }
+#taunt-region {
+  position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; overflow: hidden;
+}
+#rotate-hint { display: none; }
+@media (orientation: portrait) and (max-width: 500px) {
+  #rotate-hint {
+    display: block; position: fixed; top: env(safe-area-inset-top);
+    width: 100%; text-align: center; font-size: 13px; opacity: .8;
+    pointer-events: none; z-index: 10;
+  }
+}

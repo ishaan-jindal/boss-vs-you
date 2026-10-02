@@ -1,0 +1,24 @@
+[project]
+name = "bossfight"
+version = "0.1.0"
+description = "Boss vs You — real-time boss-battler with strategic model brain"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "httpx>=0.27",
+  "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bossfight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
