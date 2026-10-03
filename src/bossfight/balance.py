@@ -55,6 +55,14 @@ TIER2_DESCENT = 12  # from here Edge -> +5, Vigour -> +40
 POTION_FLAT = 30.0
 POTION_PCT_MAX_HP = 0.03
 
+# --- EXP curve (plan §3.3): threshold-relative, never raw damage ---
+EXP_BASE_LEVEL1 = 100
+EXP_GROWTH = 0.10  # +10% compounded per level
+EXP_KILL_BONUS = 0.25  # +25% of the base threshold on kill
+EXP_FACTOR_LO = 0.60
+EXP_FACTOR_HI = 0.90
+EXP_CAP_SECS = 90.0  # time-survived EXP stops accruing here per fight
+
 # Mid-form pool for analytic TTK. Ratios are base-independent; the absolute
 # lands ~12s analytic, i.e. ~1-2 min at real 10-25% uptime. See bosses.py.
 BOSS_BASE_HP = 160.0
@@ -131,8 +139,69 @@ def player_dps(build: list[str], descent: int) -> float:
     return player_melee_dmg(build, descent) / player_attack_cooldown(build)
 
 
-def potion_heal(max_hp: float) -> float:
-    return POTION_FLAT + POTION_PCT_MAX_HP * max(0.0, max_hp)
+def potion_heal(max_hp: float, descent: int = 0) -> int:
+    # descent accepted (game loop passes it) but adds no separate term: the
+    # plan's formula is flat + %max HP, and descent already enters through
+    # max_hp (Vigour 25 -> 40 at descent 12). A second per-descent coefficient
+    # would be an untripped tunable, so it stays out. Never exceeds max_hp,
+    # so a near-dead hero cannot overheal.
+    _ = max(0, descent)
+    hp = max(0.0, max_hp)
+    # math.floor(x + 0.5) = JS Math.round for non-negative x (py round() banks).
+    return int(min(math.floor(POTION_FLAT + POTION_PCT_MAX_HP * hp + 0.5), hp))
+
+
+def exp_to_next(level: int) -> int:
+    # Compounding (+10%/level), not linear (+10 XP/level): linear growth means
+    # later levels arrive at the same rate as early ones while boss HP keeps
+    # stacking, which desynchronises card cadence from boss scaling. Level 1
+    # costs 100; each level costs 10% more than the last, rounded.
+    lvl = max(1, int(level))
+    return int(math.floor(EXP_BASE_LEVEL1 * (1.0 + EXP_GROWTH) ** (lvl - 1) + 0.5))
+
+
+def exp_grant(
+    fight_secs: float,
+    damage_dealt: float,
+    damage_absorbed: float,
+    level: int,
+    descent: int,
+    killed: bool,
+    bloodlust: bool,
+) -> int:
+    """EXP for one fight: base threshold x a performance factor in
+    [0.60, 0.90], +25% of base on kill, x1.4 with Bloodlust, capped at one
+    full threshold so a fight can never grant multiple levels at once.
+    Performance blends time survived (capped at 90s, so idling past the cap
+    earns nothing extra) with damage efficiency (dealt share of total damage
+    exchanged, so huge raw numbers saturate instead of farming levels). All
+    inputs are guarded, never trusted."""
+    secs = max(0.0, fight_secs)
+    dealt = max(0.0, damage_dealt)
+    absorbed = max(0.0, damage_absorbed)
+    lvl = max(1, int(level))
+    _ = max(0, descent)  # descent shapes the fight, not the payout curve
+    base = exp_to_next(lvl)
+    time_score = min(secs, EXP_CAP_SECS) / EXP_CAP_SECS
+    total = dealt + absorbed
+    efficiency = dealt / total if total > 0 else 0.0
+    performance = 0.5 * time_score + 0.5 * efficiency
+    factor = clamp(
+        EXP_FACTOR_LO + (EXP_FACTOR_HI - EXP_FACTOR_LO) * performance,
+        EXP_FACTOR_LO,
+        EXP_FACTOR_HI,
+    )
+    grant = factor * base
+    if killed:
+        # Additive +25% of the base threshold, not x1.25 of the clamped
+        # grant: a max-performance kill can reach 1.15x threshold before the
+        # one-threshold cap below pulls it back to 1.0x.
+        grant += EXP_KILL_BONUS * base
+    if bloodlust:
+        grant *= BLOODLUST_EXP_MULT
+    grant = min(max(0.0, grant), float(base))
+    # math.floor(x + 0.5) = JS Math.round for non-negative x (py round() banks).
+    return int(math.floor(grant + 0.5))
 
 
 def descent_gain(fight_secs: float, hp_left_pct: float, descent: int) -> int:
@@ -160,6 +229,10 @@ def balance_summary() -> dict:
         "boss_speed_cap_px_s": BOSS_SPEED_CAP_PX_S,
         "tier2_descent": TIER2_DESCENT,
         "potion": {"flat": POTION_FLAT, "pct_max_hp": POTION_PCT_MAX_HP},
+        "exp_base_level1": EXP_BASE_LEVEL1,
+        "exp_growth": EXP_GROWTH,
+        "exp_kill_bonus": EXP_KILL_BONUS,
+        "exp_cap_secs": EXP_CAP_SECS,
         "cards": {
             "edge": {"melee_dmg": EDGE_DMG, "melee_dmg_tier2": EDGE_DMG_TIER2},
             "vigour": {"max_hp": VIGOUR_HP, "max_hp_tier2": VIGOUR_HP_TIER2},
