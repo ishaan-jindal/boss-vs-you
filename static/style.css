@@ -223,6 +223,13 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
   border: 2px solid var(--ink);
   padding: 2px 8px;
 }
+#descent-badge {
+  display: block; margin-top: 4px;
+  font-size: 12px; font-weight: 900; letter-spacing: 0.08em;
+  background: var(--pitch); color: var(--gold);
+  border: 2px solid var(--ink);
+  padding: 2px 8px;
+}
 .enrage-mark {
   position: absolute; left: 30%; top: -9px;
   transform: translateX(-50%) rotate(-3deg);
@@ -355,8 +362,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 }
 
 /* ---------- end panel ---------- */
-#end-stats { display: flex; gap: 10px; justify-content: center; margin: 12px 0; flex-wrap: wrap; }
-.stat-card {
+#end-stats { display: flex; gap: 10px; justify-content: center; margin: 12px 0; flex-wrap: wrap; }.stat-card {
   border: 3px solid var(--gold);
   box-shadow: 4px 4px 0 #000;
   background: var(--pitch); color: var(--gold);
@@ -367,6 +373,55 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 .stat-v { display: block; font-size: 28px; font-weight: 900; }
 .end-warm { font-size: 17px; font-weight: 600; }
 .end-btns { margin-top: 8px; }
+#end-build { font-size: 14px; font-weight: 700; }
+#end-build:empty, #end-read:empty { display: none; }
+#end-read {
+  font-size: 15px; font-weight: 600; font-style: italic;
+  background: var(--pitch); color: var(--gold);
+  border: 3px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+  padding: 10px 14px; margin: 10px 0;
+  transform: rotate(0.6deg); text-align: left;
+}
+
+/* ---------- level-up draft (reuses .screen/.panel/.kicker/.big-btn language) ---------- */
+#screen-draft { z-index: 16; } /* above HUD/buttons: the pick owns the screen while paused */
+.draft-panel { max-width: 680px; }
+#draft-cards { display: flex; flex-direction: column; gap: 12px; margin: 10px 0 6px; }
+.draft-card {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px;
+  font: inherit; text-align: left; cursor: pointer;
+  background:
+    repeating-linear-gradient(115deg, transparent 0 18px, rgba(20, 16, 12, 0.03) 18px 20px),
+    var(--card);
+  color: var(--ink);
+  border: 4px solid var(--ink);
+  border-left: 16px solid var(--accent, var(--gold));
+  box-shadow: var(--shadow);
+  padding: 12px 14px;
+}
+.draft-card:nth-child(odd) { transform: rotate(-0.6deg); }
+.draft-card:nth-child(even) { transform: rotate(0.6deg); }
+.draft-card:hover { filter: brightness(0.97); }
+.draft-card:active { transform: translate(2px, 2px); box-shadow: 2px 2px 0 var(--ink); }
+.draft-card .key {
+  flex: 0 0 auto;
+  font-size: 15px; font-weight: 900;
+  background: var(--pitch); color: var(--gold);
+  border: 3px solid var(--ink);
+  padding: 4px 10px; transform: rotate(-3deg);
+}
+.draft-card .draft-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.draft-card .draft-name { font-weight: 900; font-size: 18px; }
+.draft-card .draft-fx { font-size: 14px; font-weight: 800; }
+.draft-card .draft-why { font-size: 12px; font-weight: 600; font-style: italic; opacity: 0.75; }
+.draft-card .draft-tier {
+  flex: 0 0 auto;
+  font-size: 11px; font-weight: 900; letter-spacing: 0.1em;
+  background: var(--gold); color: var(--pitch);
+  border: 3px solid var(--ink);
+  padding: 4px 8px; transform: rotate(2deg);
+}
 
 /* ---------- juice layers ---------- */
 #bv-vignette {

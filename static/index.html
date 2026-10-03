@@ -43,6 +43,7 @@
     </div>
     <div class="hp-mid">
       <span id="clock">0:00</span>
+      <span id="descent-badge">DESCENT 1 · LV 1</span>
       <span id="cooldowns"></span>
     </div>
     <div class="hp-panel boss">
@@ -72,11 +73,24 @@
     <h1 id="end-title" class="title small tilt"></h1>
     <p id="end-flavour" class="tagline"></p>
     <div id="end-stats"></div>
+    <p id="end-build" class="status"></p>
+    <p id="end-read"></p>
     <p id="end-ladder" class="status"></p>
     <div class="end-btns">
       <button id="btn-rematch" class="big-btn">↓ DESCEND AGAIN</button>
       <button id="btn-bosses" class="ghost-btn">← MENU</button>
     </div>
+  </div>
+</section>
+
+<!-- DRAFT (level-up card pick; .screen dims + freezes, F.paused stops sim) -->
+<section id="screen-draft" class="screen" aria-label="Level up draft">
+  <div class="panel draft-panel">
+    <p class="kicker">LEVEL UP — PICK ONE</p>
+    <h1 id="draft-title" class="title small tilt">TAKE A SCAR</h1>
+    <p id="draft-sub" class="tagline"></p>
+    <div id="draft-cards" role="listbox" aria-label="Level up cards"></div>
+    <p class="footnote">No timer. The world is frozen solid. Pick when ready — keys 1–3, tap, or click.</p>
   </div>
 </section>
 

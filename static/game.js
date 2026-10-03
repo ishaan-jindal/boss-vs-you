@@ -5,9 +5,14 @@
  * death ends the run.
  *
  * DESIGNER HOOKS (stable names for a later visual pass):
- * DOM screens: #screen-menu, #screen-end (sections, .active shows)
+ * DOM screens: #screen-menu, #screen-end (sections, .active shows),
+ *   #screen-draft (level-up pick; driven directly, never via showScreen)
  * HUD: #hud, #hp-player-fill, #hp-player-num, #hp-boss-fill, #hp-boss-num,
- *   #boss-name, #clock, #cooldowns, #potion-count, #hint-bar
+ *   #boss-name, #clock, #descent-badge, #cooldowns, #potion-count, #hint-bar
+ * Draft: #draft-title, #draft-sub, #draft-cards (+ .draft-card, .key,
+ *   .draft-meta/.draft-name/.draft-fx/.draft-why, .draft-tier)
+ * End: #end-kicker, #end-title, #end-flavour, #end-stats (.stat-card),
+ *   #end-build, #end-read, #end-ladder, #btn-rematch, #btn-bosses
  * Controls: #joy-zone (+ #joy-base, #joy-knob), #btn-attack, #btn-special,
  *   #btn-dash, #btn-potion
  * Juice: #arena-canvas, #pop-layer (.pop, .pop.static for reduced-motion),
@@ -18,9 +23,12 @@
  *   dust, crack decals). Impact feel: hitstop freezes update for a beat on
  *   every landed hit (see hitstop()); shake is heavy on purpose; dust and
  *   cracks sell the weight. All comic, never gore: debris and dust only.
- * localStorage: none. The old 'bvy-ladder' key (three-boss ladder progress)
- *   existed only for the selection screen and is deleted with it; attempt
- *   log / best-descent persistence land with the learning lane.
+ * localStorage: 'bvy.best_descent' (int, deepest descent ever) and
+ *   'bvy.run_history' (last ≤60 fight records, survives the run — the
+ *   attempt log the learning lane reads). Player stats are NEVER persisted.
+ *   Learning lane will add 'bvy.habit_profile' (expected shape: an object of
+ *   habit counters {turtle_ratio, dash_spam, potion_timing,
+ *   attack_range_pref, stationary_ratio, opener, death_causes:{cause:n}}).
  *
  * Combat contract (matches bosses.py numbers exactly):
  * player HP 100, melee dmg 8 @ 0.6s, special 25 @ 12s, dash i-frames 0.25s @ 4s,
@@ -30,12 +38,17 @@
  *
  * Fight state (F) — single mutable per-run object:
  *   F.stats: live player numbers (maxHp, hp, damage, specialDmg, attackCd,
- *     specialCd, dashCd, dashCharges, speed, atkRange, specialRange,
- *     potionHeal, potionsLeft, level, xp, descent). Draft/level-up code
- *     mutates these live; nothing caches them elsewhere.
- *   F.boss: { form, hp, maxHp } — the current form's live pool. A transform
- *     resets form/maxHp/hp together. F.maxHp aliases F.boss.maxHp. Never use
- *     F.cfg.hp for live math (it is the design-time value).
+ *     specialCd, dashCd, dashCharges, dmgReduction, speed, atkRange,
+ *     specialRange, potionHeal, potionsLeft, level, xp, descent). Draft
+ *     cards mutate these live; nothing caches them elsewhere. F.build is
+ *     the run's card-taken list (names, reset each run, shown on death).
+ *   F.boss: { form, hp, maxHp } — the current form's live pool, scaled by
+ *     descent (see bossHpPool). A transform/return resets form/maxHp/hp
+ *     together. F.maxHp aliases F.boss.maxHp. Never use F.cfg.hp for live
+ *     math (it is the design-time value).
+ *   F.runHistory: in-memory attempt log (mirrored to localStorage, ≤60).
+ *   F.transitioning: true between boss-hp-0 and the boss's return, so the
+ *     per-frame ending check cannot re-enter killBoss mid-draft.
  *   F.paused: true while any menu/draft/overlay is open. Simulation
  *     (update + all deferred damage) freezes; rendering continues.
  *   F.lastAppliedSeq: seq guard — brain replies with seq <= this are stale.
@@ -69,11 +82,103 @@ function defaultStats() {
   return {
     maxHp: 100, hp: 100,
     damage: 8, specialDmg: 25,
-    attackCd: 0.6, specialCd: 12, dashCd: 4, dashCharges: 1,
+    attackCd: 0.6, specialCd: 12, dashCd: 4, dashCharges: 1, dmgReduction: 0,
     speed: 220 * PX, atkRange: 100 * PX, specialRange: 150 * PX,
     potionHeal: 30, potionsLeft: 2,
     level: 1, xp: 0, descent: 1,
   };
+}
+
+/* ---------- balance (single source of truth: GET /api/balance) ----------
+ * Fetched at boot and re-fetched on every run restart. Anything absent from
+ * the payload gets a TODO(balance: <key>) naming the exact key the balance
+ * lane should add, plus a temporary local fallback so the flow still works. */
+let BAL = null;
+async function loadBalance() {
+  try {
+    BAL = await api('/api/balance');
+  } catch {
+    BAL = null; // offline: every helper below falls back to its temp constant
+  }
+  return BAL;
+}
+function refreshBalance() { loadBalance().catch(() => {}); } // fire-and-forget on run restart
+function balNum(path, fallback) {
+  let v = BAL;
+  for (const k of path) {
+    if (v == null || typeof v !== 'object') return fallback;
+    v = v[k];
+  }
+  const n = Number(v);
+  return isFinite(n) ? n : fallback;
+}
+/* Potion scales with the player: flat + pct*maxHp (payload: potion.flat/pct_max_hp). */
+function potionHealFor(maxHp) {
+  return balNum(['potion', 'flat'], 30) + balNum(['potion', 'pct_max_hp'], 0.03) * Math.max(0, maxHp);
+}
+// TODO(balance: xp_threshold) — the EXP curve lives with the balance lane.
+// Expected shape: a per-level number, or {base, growth} for
+// base + growth*(level-1). Temp fallback: flat 100 per level.
+const XP_THRESHOLD_FALLBACK = 100;
+function xpThreshold(level) {
+  if (!BAL || BAL.xp_threshold == null) return XP_THRESHOLD_FALLBACK;
+  const t = BAL.xp_threshold;
+  if (typeof t === 'number' && isFinite(t) && t > 0) return t;
+  if (typeof t === 'object') {
+    const base = Number(t.base), growth = Number(t.growth || 0);
+    if (isFinite(base) && base > 0) return base + Math.max(0, growth) * (Math.max(1, level) - 1);
+  }
+  return XP_THRESHOLD_FALLBACK;
+}
+// TODO(balance: descent_par) — the governor's par constants live with the
+// balance lane. Expected shape: {par_base_s, par_per_descent_s} (and
+// optionally {time_cap_s} for the XP time-survived cap, temp 90s).
+// Temp fallback mirrors src/bossfight/balance.py::descent_gain exactly.
+const DESCENT_PAR_BASE_FALLBACK = 90, DESCENT_PAR_PER_LEVEL_FALLBACK = 4, XP_TIME_CAP_FALLBACK_S = 90;
+function descentGain(fightSecs, hpLeftPct, descent) {
+  const parBase = balNum(['descent_par', 'par_base_s'], DESCENT_PAR_BASE_FALLBACK);
+  const parPer = balNum(['descent_par', 'par_per_descent_s'], DESCENT_PAR_PER_LEVEL_FALLBACK);
+  const par = parBase + parPer * Math.max(0, descent);
+  const speed = fightSecs <= 0 ? 1 : clamp(par / fightSecs, 0, 1);
+  const clean = clamp(hpLeftPct / 100, 0, 1);
+  return clamp(1 + Math.round(speed + clean), 1, 3);
+}
+/* Boss pools scale additively per descent (descent 1 wears the base pool
+ * exactly; payload: boss_{hp,dmg,speed}_growth_per_level + speed cap). */
+function bossHpPool(def, descent) {
+  const g = balNum(['boss_hp_growth_per_level'], 0.05);
+  return Math.round(def.hp * (1 + g * Math.max(0, descent - 1)));
+}
+function bossDmgMul(descent) {
+  return 1 + balNum(['boss_dmg_growth_per_level'], 0.05) * Math.max(0, descent - 1);
+}
+function bossMovePxS(def, descent) {
+  const g = balNum(['boss_speed_growth_per_level'], 0.02);
+  const cap = balNum(['boss_speed_cap_px_s'], 200);
+  return Math.min(def.move_speed * (1 + g * Math.max(0, descent - 1)), cap);
+}
+function tier2Descent() { return Math.round(balNum(['tier2_descent'], 12)); }
+
+/* ---------- run persistence (best + attempt log only, never player stats) ---------- */
+const LS_BEST = 'bvy.best_descent';
+const LS_HISTORY = 'bvy.run_history';
+const HISTORY_CAP = 60;
+function loadBest() {
+  try { return Math.max(0, parseInt(localStorage.getItem(LS_BEST) || '0', 10) || 0); }
+  catch { return 0; }
+}
+function saveBest(d) { try { localStorage.setItem(LS_BEST, String(d)); } catch { /* private mode: record lost, run survives */ } }
+function loadHistory() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_HISTORY) || '[]');
+    return Array.isArray(v) ? v.slice(-HISTORY_CAP) : [];
+  } catch { return []; }
+}
+function pushHistory(rec) {
+  if (!F) return;
+  F.runHistory.push(rec);
+  while (F.runHistory.length > HISTORY_CAP) F.runHistory.shift();
+  try { localStorage.setItem(LS_HISTORY, JSON.stringify(F.runHistory)); } catch { /* run survives */ }
 }
 const KEYMAP = [
   ['Move', 'WASD / arrows / left stick'],
@@ -202,25 +307,36 @@ function say(line) {
 function formById(id) { return FORMS.find((f) => f.id === id) || null; }
 
 function buildMenu() {
-  $('menu-status').textContent = 'It is waiting below. It remembers you.';
+  const best = loadBest();
+  $('menu-status').textContent = best > 0
+    ? 'It is waiting below. It remembers you. Best: descent ' + best + '.'
+    : 'It is waiting below. It remembers you.';
   $('btn-fight').onclick = () => startFight();
 }
 
 function showEnd(r) {
-  $('end-kicker').textContent = 'THE RUN ENDS';
+  $('end-kicker').textContent = 'THE RUN ENDS AT DESCENT ' + F.stats.descent;
   $('end-title').textContent = 'IT GETS UP. YOU DO NOT.';
   $('end-flavour').textContent = '\u201C' + (F.lastTaunt || 'Down here, hero.') + '\u201D';
   const m = Math.floor(r.secs / 60), s = Math.floor(r.secs % 60);
   $('end-stats').innerHTML =
     statCard('TIME', m + ':' + String(s).padStart(2, '0')) +
     statCard('DESCENT', String(F.stats.descent)) +
+    statCard('LEVEL', String(F.stats.level)) +
     statCard('SCORE', String(r.score));
-  $('end-ladder').textContent = 'One life. No win. Descend again.';
+  const build = (F.build || []).map(cardName).filter(Boolean);
+  $('end-build').textContent = build.length
+    ? 'Final build (Lv ' + F.stats.level + '): ' + build.join(' · ')
+    : 'No cards taken. The dark keeps the deposit.';
+  $('end-read').textContent = F.lastRead ? '\u201CIts read on you: ' + F.lastRead + '\u201D' : '';
+  const best = loadBest();
+  $('end-ladder').textContent = 'Best descent ' + Math.max(best, F.stats.descent) + '. One life. No win. Descend again.';
+  $('btn-rematch').textContent = 'DESCEND AGAIN';
   $('btn-rematch').onclick = () => startFight();
   const nb = $('btn-next');
   if (nb) nb.style.display = 'none';
   const bb = $('btn-bosses');
-  if (bb) bb.onclick = () => showScreen('menu');
+  if (bb) { bb.textContent = 'MENU'; bb.onclick = () => { buildMenu(); showScreen('menu'); }; }
   showScreen('end');
 
   function statCard(k, v) {
@@ -232,6 +348,8 @@ function showEnd(r) {
 function startFight() {
   const cfg = formById('crawler') || FORMS[0];
   if (!cfg) return; // forms not loaded yet — menu stays until /api/bosses lands
+  refreshBalance(); // re-fetch the single source of truth on every run restart
+  hideDraft(); // a dead run never leaves its draft open behind the new one
   const mySeq = ++fightSeq;
   const W = arena.ARENA_X, H = arena.ARENA_Z;
   F = {
@@ -240,16 +358,23 @@ function startFight() {
     paused: false, pauseT0: 0,
     lastAppliedSeq: -1,
     stats: defaultStats(),
-    boss: { form: cfg.id, hp: cfg.hp, maxHp: cfg.hp },
-    tacticWeights: null, lastNextForm: null, lastTaunt: '',
+    build: [], // card names taken this run — reset every run, shown on death
+    runHistory: loadHistory(), // attempt log: persists across runs, ≤60
+    boss: { form: cfg.id, hp: bossHpPool(cfg, 1), maxHp: bossHpPool(cfg, 1) },
+    bossDmgMul: bossDmgMul(1), bossMovePxS: bossMovePxS(cfg, 1),
+    tacticWeights: null, lastNextForm: null, lastTaunt: '', lastRead: '',
     transformedThisFight: false, pendingNextForm: null, lastTransformT: -99,
+    transitioning: false, // boss-hp-0 → boss-returns window (draft lives here)
+    damageDealt: 0, lastDamageSource: '',
     px: 0, pz: H - 2.5,
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
+    dashLeft: 1, dashRefillT: 0,
     dashDx: 0, dashDz: 0, dashing: 0, facing: Math.PI,
     bx: 0, bz: -H + 2.5, flyY: 0,
     enraged: false, flying: false,
     atkTmap: {}, tactic: 'pressure', speedMul: 1, dmgMul: 1, intensity: 0.5,
-    over: false, won: false, startT: performance.now(), tick: 0,
+    over: false, won: false, startT: performance.now(), fightT0: performance.now(),
+    fightHpStart: 100, tick: 0,
     lastSwitch: -99, events: [], hist: [], brainTimer: 0, stopT: 0,
     projectiles: [], walls: [], projSeq: 0, wallSeq: 0,
     moved10: 0, movedDecay: 0, actT: 0, timeouts: [],
@@ -292,13 +417,15 @@ function setBossChrome(def) {
 /* Transform set-piece: flash, crack/shudder, silhouette rebuild, fresh pool,
  * and a banner naming the new form AND its signature tell — the player must
  * always be able to tell what the new move is and how to read it. */
-function doTransform(newForm, isMidFight) {
+function doTransform(newForm, isMidFight, read) {
   const def = formById(newForm);
   if (!def || !F || newForm === F.boss.form) return false;
   F.cfg = def;
   F.boss.form = newForm;
-  F.boss.maxHp = def.hp;
-  F.boss.hp = def.hp;
+  F.boss.maxHp = bossHpPool(def, F.stats.descent);
+  F.boss.hp = F.boss.maxHp;
+  F.bossDmgMul = bossDmgMul(F.stats.descent);
+  F.bossMovePxS = bossMovePxS(def, F.stats.descent);
   F.enraged = false;
   arena.setBoss((def.visual && def.visual.recipe) || 'courier', def.visual || {});
   arena.clearTelegraphs(); // old windups die with the old body — never resolve stale
@@ -309,9 +436,10 @@ function doTransform(newForm, isMidFight) {
   setVignette(false);
   setBossChrome(def);
   const sig = def.attacks.find((a) => a.id === def.signature) || def.attacks[0];
+  const sub = (read ? '\u201CIts read on you: ' + read + '\u201D — ' : '') + def.title;
   showBanner((isMidFight ? 'IT BECOMES — ' : 'DESCENT ' + F.stats.descent + ' — ') + def.name.toUpperCase(),
     'NEW MOVE: ' + sig.id.toUpperCase() + ' — ' + (sig.telegraph_ms / 1000).toFixed(2) + 's WINDUP',
-    def.title, css(def.colour));
+    sub, css(def.colour));
   say((BOSS && BOSS.taunt_voice && BOSS.taunt_voice[1]) || def.title);
   F.events.push('boss became ' + newForm);
   return true;
@@ -333,7 +461,8 @@ function later(ms, fn) {
 function refreshPotions() {
   if (!F) return;
   const S = F.stats;
-  $('potion-count').textContent = 'POT ×' + S.potionsLeft + (S.potionsLeft ? ' (+' + S.potionHeal + ')' : ' (empty)');
+  const heal = Math.round(potionHealFor(S.maxHp));
+  $('potion-count').textContent = 'POT ×' + S.potionsLeft + (S.potionsLeft ? ' (+' + heal + ')' : ' (empty)');
 }
 
 /* ---------- player actions ---------- */
@@ -357,6 +486,7 @@ function tryAttack(special) {
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
     const eff = Math.max(1, dmg - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
     F.boss.hp -= eff;
+    F.damageDealt = (F.damageDealt || 0) + eff; // the attempt log's damage_dealt
     F.events.push(special ? 'boss hit by special' : 'boss hit');
     hitstop(special ? 0.09 : 0.05);
     arena.burst(F.bx, F.bz, special ? 0xffd75e : 0xffffff, special ? 14 : 9, 4.5, 1.0 + F.flyY);
@@ -372,8 +502,10 @@ function tryAttack(special) {
 
 function tryDash() {
   if (!F || F.over || F.paused || state !== 'fight') return; // paused: no movement
+  if ((F.dashLeft || 0) <= 0) return; // out of charges — refill ticks in update()
   const now = performance.now() / 1000;
-  if (now - F.dashT < F.stats.dashCd) return;
+  if (now - F.dashT < 0.25) return; // double-tap guard, not the cooldown (charges own that)
+  F.dashLeft--;
   F.dashT = now;
   F.ifrT = now + 0.25;
   F.dashing = 0.18;
@@ -395,11 +527,12 @@ function tryPotion() {
   const S = F.stats;
   if (S.potionsLeft <= 0 || S.hp >= S.maxHp) return;
   S.potionsLeft--;
-  S.hp = Math.min(S.maxHp, S.hp + S.potionHeal);
+  const heal = Math.round(potionHealFor(S.maxHp)); // 30 + 3% max HP: flat heals go dead ~descent 27
+  S.hp = Math.min(S.maxHp, S.hp + heal);
   refreshPotions();
   F.events.push('player healed');
   arena.burst(F.px, F.pz, 0x7cff6b, 10, 3.5);
-  spawnPop(F.px, 1.8, F.pz, '+' + S.potionHeal + ' PATCHED!', 'heal');
+  spawnPop(F.px, 1.8, F.pz, '+' + heal + ' PATCHED!', 'heal');
 }
 
 function hurtPlayer(dmg, why) {
@@ -409,13 +542,15 @@ function hurtPlayer(dmg, why) {
     if (dmg > 0) spawnPop(F.px, 1.8, F.pz, 'TOO SLOW!', 'heal');
     return;
   }
-  F.stats.hp -= dmg;
+  if (why) F.lastDamageSource = why; // the attempt log's last_damage_source
+  const eff = Math.max(1, dmg - (F.stats.dmgReduction || 0)); // Stone Skin taxes every hit, floor 1, never immune
+  F.stats.hp -= eff;
   F.events.push('player hit' + (why ? ' (' + why + ')' : ''));
-  if (dmg > 0) {
+  if (eff > 0) {
     hitstop(0.07);
     arena.burst(F.px, F.pz, 0xff5a4e, 10, 4);
     arena.dust(F.px, F.pz, 8);
-    spawnPop(F.px, 2.0, F.pz, '-' + dmg, 'bad');
+    spawnPop(F.px, 2.0, F.pz, '-' + eff, 'bad');
     arena.shake(0.7);
     domFlash();
   }
@@ -454,7 +589,7 @@ function think(first) {
     boss_id: self.bossId, tick: seq, seq,
     descent: self.stats.descent, form: self.boss.form,
     boss_hp_pct: Math.round(bossPct), player_hp_pct: Math.round(Math.max(0, self.stats.hp)),
-    habits: habits(), build: [],
+    habits: habits(), build: (self.build || []).slice(),
     fight_secs: (performance.now() - self.startT) / 1000,
     last_damage_source: self.events.length ? self.events[self.events.length - 1] : '',
     history: self.events.slice(-4),
@@ -506,6 +641,7 @@ function applyBrain(out, ctx) {
     }
   }
   if (out.taunt) { F.lastTaunt = out.taunt; say(out.taunt); }
+  if (typeof out.read === 'string' && out.read) F.lastRead = out.read; // surfaced on descent cards + death screen
   if (typeof out.intensity === 'number') F.intensity = out.intensity;
 }
 
@@ -601,7 +737,7 @@ function telegraph(a, fake) {
 
 function resolveAttack(a, t) {
   if (!F || F.over || F.paused) return; // paused: no attack resolution
-  const dmg = Math.round(a.damage * F.dmgMul);
+  const dmg = Math.max(1, Math.round(a.damage * F.dmgMul * (F.bossDmgMul || 1))); // enrage × descent escalation
   if (a.pattern === 'projectile') {
     const id = 'p' + (F.projSeq++);
     const dx = F.px - F.bx, dz = F.pz - F.bz;
@@ -685,13 +821,20 @@ function update(dt) {
   F.pz = clamp(F.pz, -H + 0.7, H - 0.7);
   arena.heroPos(F.px, F.pz, F.facing, now < F.ifrT, F.dashing > 0);
 
+  // dash charges refill one per dashCd while below max
+  // (unreachable while paused — update returns above, so the refill freezes)
+  if (F.dashLeft < F.stats.dashCharges) {
+    F.dashRefillT += dt;
+    if (F.dashRefillT >= F.stats.dashCd) { F.dashLeft++; F.dashRefillT = 0; }
+  }
+
   // boss movement: approach / strafe by sampled tactic
   const prefs = tacticPrefs(F.tactic || 'pressure');
   const dx = F.px - F.bx, dz = F.pz - F.bz;
   const d = Math.hypot(dx, dz) || 1;
   const nx = dx / d, nz = dz / d;
   const want = !prefs.near ? 8.5 : 2.3;
-  const bs = F.cfg.move_speed * PX * F.speedMul;
+  const bs = (F.bossMovePxS || F.cfg.move_speed) * PX * F.speedMul; // descent-scaled, enrage-multiplied
   const dir = d > want + 0.7 ? 1 : (d < want - 0.7 ? -1 : 0);
   const strafe = Math.sin(now * 1.3) * 0.7;
   F.bx = clamp(F.bx + (nx * dir - nz * strafe * 0.5) * bs * dt, -W + 1, W - 1);
@@ -749,17 +892,21 @@ function updateHUD() {
   const S = F.stats;
   setBar('hp-player', S.hp, S.maxHp);
   setBar('hp-boss', F.boss.hp, F.boss.maxHp);
-  $('potion-count').textContent = 'POT ×' + S.potionsLeft;
+  $('potion-count').textContent = 'POT ×' + S.potionsLeft + (S.potionsLeft ? ' (+' + Math.round(potionHealFor(S.maxHp)) + ')' : ' (empty)');
+  $('descent-badge').textContent = 'DESCENT ' + S.descent + ' · LV ' + S.level + ' · XP ' + Math.floor(S.xp) + '/' + xpThreshold(S.level);
   const s = Math.floor((performance.now() - F.startT) / 1000);
   $('clock').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   const now = performance.now() / 1000;
   const cd = (t, c) => Math.max(0, c - (now - t));
+  const dashReady = (F.dashLeft || 0) > 0;
+  const dashTxt = dashReady ? 'READY×' + F.dashLeft
+    : fmtCd(Math.max(0, S.dashCd - (F.dashRefillT || 0)));
   $('cooldowns').textContent =
     'ATK ' + fmtCd(cd(F.atkT, S.attackCd)) + '  SPEC ' + fmtCd(cd(F.specT, S.specialCd)) +
-    '  DASH ' + fmtCd(cd(F.dashT, S.dashCd));
+    '  DASH ' + dashTxt;
   $('btn-attack').classList.toggle('cool', cd(F.atkT, S.attackCd) > 0);
   $('btn-special').classList.toggle('cool', cd(F.specT, S.specialCd) > 0);
-  $('btn-dash').classList.toggle('cool', cd(F.dashT, S.dashCd) > 0);
+  $('btn-dash').classList.toggle('cool', !dashReady);
   $('btn-potion').classList.toggle('cool', S.potionsLeft <= 0);
 }
 function fmtCd(v) { return v > 0 ? v.toFixed(1) + 's' : 'READY'; }
@@ -769,31 +916,266 @@ function setBar(id, v, max) {
   $(id + '-num').textContent = Math.max(0, Math.round(v)) + ' / ' + max;
 }
 
-/* A kill is a descent transition, not a victory: the boss always gets
- * up. Honour any transform the client held back (pendingNextForm), else
- * the brain's last next_form, else keep wearing this body with a fresh
- * pool. The mid-fight budget resets — every descent gets one set-piece. */
+/* A kill is a descent transition, not a victory. In order:
+ * 1. Boss falls (death juice stays; the arena-impact set-piece is a later lane's job).
+ * 2. A record hits F.runHistory (persisted, ≤60).
+ * 3. d_next = descent + descent_gain(fight_secs, hp_pct_left, descent).
+ * 4. XP threshold crossed → pause + draft, one level-up at a time (loops).
+ * 5. Kill potion: potion_heal HP, capped at max — never a full heal (attrition).
+ * 6. Descent card: the number, what changed (form + signature tell + windup),
+ *    and the boss's read. Never a mystery why it got worse.
+ * 7. Boss returns: form/hp/maxHp reset to the new form's scaled pool. */
 function killBoss() {
-  if (F.over) return;
-  const d = ++F.stats.descent;
-  F.transformedThisFight = false;
-  const returnForm = F.pendingNextForm || F.lastNextForm || F.boss.form;
-  F.pendingNextForm = null;
+  if (!F || F.over || F.transitioning) return;
+  F.transitioning = true;
+  // 1. Boss falls.
+  // HOOK(arena-impact): the fall wants a crack ring + pooling blood here —
+  // a later lane's job. arena.spawnCrack / the blood-decal path own it.
   arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
-  if (returnForm !== F.boss.form) {
-    doTransform(returnForm, false);
-  } else {
-    F.boss.maxHp = F.cfg.hp;
-    F.boss.hp = F.cfg.hp;
-    showBanner('DESCENT ' + d, F.cfg.name.toUpperCase() + ' GETS UP', 'same body. hungrier.', css(F.cfg.colour));
+  // 2. Attempt log.
+  const fightSecs = (performance.now() - F.fightT0) / 1000;
+  const hpPctLeft = clamp(F.stats.hp / F.stats.maxHp * 100, 0, 100);
+  pushHistory({
+    descent: F.stats.descent, form: F.boss.form, outcome: 'kill',
+    fight_secs: Math.round(fightSecs * 10) / 10,
+    hp_at_start: Math.round(F.fightHpStart), hp_at_end: Math.max(0, Math.round(F.stats.hp)),
+    last_damage_source: F.lastDamageSource || (F.events.length ? F.events[F.events.length - 1] : ''),
+    damage_dealt: Math.round(F.damageDealt || 0),
+  });
+  grantKillXp(fightSecs);
+  // 3. Governor: clean + fast climbs, scrappy wins still advance.
+  const dNext = F.stats.descent + descentGain(fightSecs, hpPctLeft, F.stats.descent);
+  // 4. Level-ups pause the world; the chain below runs after the last pick.
+  setPaused(true);
+  processLevelUps(dNext, () => {
+    // 5. Kill potion — attrition: a portion, capped, never a full heal.
+    const S = F.stats;
+    const heal = Math.round(potionHealFor(S.maxHp));
+    S.hp = Math.min(S.maxHp, S.hp + heal);
+    spawnPop(F.px, 1.8, F.pz, '+' + heal + ' STOLEN BREATH', 'heal');
+    refreshPotions();
+    // 6+7. Deeper, and it wears whatever the brain last asked for.
+    S.descent = dNext;
+    saveBest(Math.max(loadBest(), dNext));
+    F.fightHpStart = S.hp;
+    F.fightT0 = performance.now();
+    F.damageDealt = 0; F.lastDamageSource = '';
+    F.transformedThisFight = false;
+    const returnForm = F.pendingNextForm || F.lastNextForm || F.boss.form;
+    F.pendingNextForm = null;
+    resetEnrage();
+    if (returnForm !== F.boss.form) {
+      doTransform(returnForm, false, F.lastRead); // banner carries the read
+    } else {
+      F.boss.maxHp = bossHpPool(F.cfg, dNext);
+      F.boss.hp = F.boss.maxHp;
+      F.bossDmgMul = bossDmgMul(dNext);
+      F.bossMovePxS = bossMovePxS(F.cfg, dNext);
+      arena.burst(F.bx, F.bz, 0xffe9a8, 10, 4, 1.0 + F.flyY);
+      const sub = (F.lastRead ? '\u201CIts read on you: ' + F.lastRead + '\u201D — ' : '') + 'same body. hungrier.';
+      showBanner('DESCENT ' + dNext, F.cfg.name.toUpperCase() + ' GETS UP', sub, css(F.cfg.colour));
+    }
+    F.transitioning = false;
+    setPaused(false); // resume into the descent card
+    think(); // load-bearing decisions move to the between-fight window
+  });
+}
+
+function resetEnrage() {
+  if (!F) return;
+  F.enraged = false;
+  F.speedMul = 1; F.dmgMul = 1;
+  try { arena.setEnrage(false); } catch { /* visual only */ }
+  setVignette(false);
+}
+
+/* ---------- XP + level-up draft ---------- */
+/* XP is granted on the kill only: ~60–90% of threshold scaled by capped
+ * time-survived, ×1.25 kill bonus, ×Bloodlust mult. Death grants nothing —
+ * there is no one left to spend it — and idling past the cap gains nothing. */
+function expMult() {
+  const n = (F && F.build ? F.build.filter((c) => c === 'bloodlust').length : 0);
+  return Math.pow(balNum(['cards', 'bloodlust', 'exp_mult'], 1.4), n);
+}
+function grantKillXp(fightSecs) {
+  const S = F.stats;
+  const t = xpThreshold(S.level);
+  const cap = (BAL && BAL.descent_par && Number(BAL.descent_par.time_cap_s)) || XP_TIME_CAP_FALLBACK_S;
+  const frac = 0.6 + 0.3 * (Math.min(Math.max(0, fightSecs), cap) / cap);
+  S.xp += Math.round(t * frac * 1.25 * expMult());
+}
+
+/* The six cards (ids match GET /api/balance's card table; stone_skin with
+ * the underscore). Effect numbers read live from BAL so tier-2/deep values
+ * land without a client change. */
+const CARD_ORDER = ['vigour', 'edge', 'swiftness', 'marrow', 'stone_skin', 'bloodlust'];
+const CARD_ACCENT = {
+  vigour: 'var(--moss)', edge: 'var(--gold)', swiftness: 'var(--hero)',
+  marrow: 'var(--smoke)', stone_skin: 'var(--dust)', bloodlust: 'var(--danger)',
+};
+function cardName(id) {
+  return { vigour: 'Vigour', edge: 'Edge', swiftness: 'Swiftness', marrow: 'Marrow', stone_skin: 'Stone Skin', bloodlust: 'Bloodlust' }[id] || id;
+}
+function cardFx(id, descent) {
+  const deep = descent >= tier2Descent();
+  const cards = (BAL && BAL.cards) || {};
+  const num = (obj, k, fb) => { const n = Number(obj && obj[k]); return isFinite(n) ? n : fb; };
+  if (id === 'vigour') { const v = num(cards.vigour, deep ? 'max_hp_tier2' : 'max_hp', deep ? 40 : 25); return '+' + v + ' max HP, healed at once'; }
+  if (id === 'edge') { const v = num(cards.edge, deep ? 'melee_dmg_tier2' : 'melee_dmg', deep ? 5 : 3); return '+' + v + ' melee damage'; }
+  if (id === 'swiftness') { const m = num(cards.swiftness, 'cooldown_mult', 0.9), f = num(cards.swiftness, 'cooldown_floor_s', 0.3); return 'attack cooldown ×' + m + ' (floor ' + f + 's)'; }
+  if (id === 'marrow') { const c = num(cards.marrow, 'dash_charges', 1), r = num(cards.marrow, 'dash_cd_reduction_s', 0.5); return '+' + c + ' dash charge, −' + r + 's refill'; }
+  if (id === 'stone_skin') { const v = num(cards.stone_skin, 'dmg_reduction', 1), f = num(cards.stone_skin, 'dmg_taken_floor', 1); return '−' + v + ' damage taken (floor ' + f + ')'; }
+  if (id === 'bloodlust') { const m = num(cards.bloodlust, 'exp_mult', 1.4), p = num(cards.bloodlust, 'max_hp_penalty', 8); return '+' + Math.round((m - 1) * 100) + '% XP, but −' + p + ' max HP'; }
+  return id;
+}
+/* Draw weighting: counter the body you are about to face (the brain's
+ * pending/last next_form when it has spoken, else the body just killed).
+ * colossus (armoured, slow, slam): Stone Skin eats the per-swing armour tax,
+ * Marrow steps out of the slam ring, Vigour survives the heavy phase.
+ * hollow (450ms tells, feints): Edge/Swiftness punish the short honest
+ * windows, Marrow repositions through the lies.
+ * wraith (fast, blink-strike): Marrow/Swiftness match its tempo, Edge trades.
+ * crawler (baseline): even — nothing to counter yet.
+ * Bloodlust always trails (0.7): a trade, never a counter. */
+// # ponytail: fixed weight table, no re-roll; add a re-roll only if drafts feel dead.
+function cardWeightsFor(formId) {
+  const w = { vigour: 1, edge: 1, swiftness: 1, marrow: 1, stone_skin: 1, bloodlust: 0.7 };
+  if (formId === 'colossus') { w.stone_skin = 3; w.marrow = 2.5; w.vigour = 1.5; w.edge = 1.5; }
+  else if (formId === 'hollow') { w.edge = 2.5; w.swiftness = 2.5; w.marrow = 1.5; }
+  else if (formId === 'wraith') { w.marrow = 2.5; w.swiftness = 2; w.edge = 1.5; }
+  return w;
+}
+function counterNote(id, formId) {
+  const N = {
+    'colossus|stone_skin': 'Eats the stone armour tax',
+    'colossus|marrow': 'Out-steps the slam ring',
+    'colossus|vigour': 'Survives the heavy phase',
+    'colossus|edge': 'Races the big pool',
+    'hollow|edge': 'Punishes the short windows',
+    'hollow|swiftness': 'Beats the feint',
+    'hollow|marrow': 'Repositions through the lies',
+    'wraith|marrow': 'Dodges the blink-strike',
+    'wraith|swiftness': 'Matches its tempo',
+    'wraith|edge': 'Trades up close',
+  };
+  return N[formId + '|' + id] || '';
+}
+function drawCards(formId) {
+  const w = cardWeightsFor(formId);
+  const bag = CARD_ORDER.slice();
+  const picks = [];
+  for (let n = 0; n < 3 && bag.length; n++) {
+    let total = 0;
+    for (const id of bag) total += w[id] || 0;
+    let r = Math.random() * total;
+    let pick = bag[0];
+    for (const id of bag) { r -= w[id] || 0; if (r <= 0) { pick = id; break; } }
+    picks.push(pick);
+    bag.splice(bag.indexOf(pick), 1);
   }
-  think(); // load-bearing decisions move to the between-fight window
+  return picks;
+}
+function applyCard(id, descent) {
+  const S = F.stats;
+  const cards = (BAL && BAL.cards) || {};
+  const num = (obj, k, fb) => { const n = Number(obj && obj[k]); return isFinite(n) ? n : fb; };
+  const deep = descent >= tier2Descent();
+  if (id === 'vigour') {
+    const v = num(cards.vigour, deep ? 'max_hp_tier2' : 'max_hp', deep ? 40 : 25);
+    S.maxHp += v; S.hp = Math.min(S.maxHp, S.hp + v); // heals the difference
+  } else if (id === 'edge') {
+    S.damage += num(cards.edge, deep ? 'melee_dmg_tier2' : 'melee_dmg', deep ? 5 : 3);
+  } else if (id === 'swiftness') {
+    const floor = num(cards.swiftness, 'cooldown_floor_s', 0.3);
+    S.attackCd = Math.max(floor, S.attackCd * num(cards.swiftness, 'cooldown_mult', 0.9)); // multiplicative: never negative
+  } else if (id === 'marrow') {
+    S.dashCharges += num(cards.marrow, 'dash_charges', 1);
+    S.dashCd = Math.max(1, S.dashCd - num(cards.marrow, 'dash_cd_reduction_s', 0.5)); // # ponytail: 1s local floor, not balance truth
+    F.dashLeft = Math.min(S.dashCharges, (F.dashLeft || 0) + 1);
+  } else if (id === 'stone_skin') {
+    S.dmgReduction = (S.dmgReduction || 0) + num(cards.stone_skin, 'dmg_reduction', 1);
+  } else if (id === 'bloodlust') {
+    S.maxHp = Math.max(1, S.maxHp - num(cards.bloodlust, 'max_hp_penalty', 8));
+    S.hp = Math.min(S.hp, S.maxHp);
+  }
+  F.build.push(id);
+}
+/* One level-up at a time; loops while XP covers further thresholds. The
+ * world stays paused across chained drafts — a single overlay owns the
+ * pause throughout (see setPaused). */
+function processLevelUps(dNext, done) {
+  const S = F.stats;
+  if (S.xp < xpThreshold(S.level)) { done(); return; }
+  S.xp -= xpThreshold(S.level);
+  S.level++;
+  const upcoming = F.pendingNextForm || F.lastNextForm || F.boss.form;
+  showDraft(drawCards(upcoming), upcoming, dNext, () => processLevelUps(dNext, done));
+}
+let draftOpen = false;
+function showDraft(picks, formId, descent, cb) {
+  draftOpen = true;
+  const def = formById(formId);
+  $('draft-title').textContent = 'TAKE A SCAR — LV ' + F.stats.level;
+  $('draft-sub').textContent = def
+    ? 'It comes back wearing ' + def.name + '. Take what counters it.'
+    : 'It comes back hungry. Take what keeps you breathing.';
+  const box = $('draft-cards');
+  box.innerHTML = '';
+  picks.forEach((id, i) => {
+    const b = document.createElement('button');
+    b.className = 'draft-card';
+    b.setAttribute('role', 'option');
+    b.style.setProperty('--accent', CARD_ACCENT[id] || 'var(--gold)');
+    const deep = descent >= tier2Descent();
+    b.innerHTML =
+      '<span class="key">' + (i + 1) + '</span>' +
+      '<span class="draft-meta"><span class="draft-name">' + cardName(id).toUpperCase() + '</span>' +
+      '<span class="draft-fx">' + cardFx(id, descent) + '</span>' +
+      (counterNote(id, formId) ? '<span class="draft-why">' + counterNote(id, formId) + '</span>' : '') +
+      '</span>' +
+      (deep ? '<span class="draft-tier">DEEP TIER</span>' : '');
+    b.addEventListener('click', () => choose(i));
+    box.appendChild(b);
+  });
+  $('screen-draft').classList.add('active');
+  const btns = box.querySelectorAll('button');
+  if (btns[0]) btns[0].focus();
+  const onKey = (e) => {
+    if (!draftOpen) return;
+    const idx = ['Digit1', 'Digit2', 'Digit3', 'Numpad1', 'Numpad2', 'Numpad3'].indexOf(e.code) % 3;
+    if (idx >= 0 && picks[idx]) { e.preventDefault(); choose(idx); }
+  };
+  showDraft._onKey = onKey;
+  window.addEventListener('keydown', onKey);
+  function choose(i) {
+    if (!draftOpen) return;
+    applyCard(picks[i], descent);
+    hideDraft();
+    cb();
+  }
+}
+function hideDraft() {
+  if (!draftOpen) { const s = $('screen-draft'); if (s) s.classList.remove('active'); return; }
+  draftOpen = false;
+  if (showDraft._onKey) window.removeEventListener('keydown', showDraft._onKey);
+  $('screen-draft').classList.remove('active');
 }
 
 function finish(won) {
   if (F.over) return;
   F.over = true;
   F.won = won;
+  if (!won) {
+    // Death ends the run: log the final fight, bank the deepest descent.
+    pushHistory({
+      descent: F.stats.descent, form: F.boss.form, outcome: 'death',
+      fight_secs: Math.round(((performance.now() - F.fightT0) / 1000) * 10) / 10,
+      hp_at_start: Math.round(F.fightHpStart), hp_at_end: 0,
+      last_damage_source: F.lastDamageSource || (F.events.length ? F.events[F.events.length - 1] : ''),
+      damage_dealt: Math.round(F.damageDealt || 0),
+    });
+    saveBest(Math.max(loadBest(), F.stats.descent));
+  }
   setVignette(false);
   arena.clearDecoys();
   const secs = (performance.now() - F.startT) / 1000;
@@ -834,7 +1216,7 @@ function bindInput() {
   const base = $('joy-base');
   const setKnob = (dx, dy) => { knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)'; };
   zone.addEventListener('pointerdown', (e) => {
-    if (!F || state !== 'fight' || F.joy.active) return;
+    if (!F || state !== 'fight' || F.paused || F.joy.active) return; // paused: stick stays dead
     F.joy.active = true;
     F.joy.id = e.pointerId;
     F.joy.cx = e.clientX; F.joy.cy = e.clientY;
@@ -923,6 +1305,8 @@ function boot() {
     BOSS = data.boss || (data.bosses && data.bosses[0]);
     FORMS = data.forms || data.bosses || [];
     ENRAGE = (BOSS && BOSS.enrage) || {};
+    return loadBalance().catch(() => null);
+  }).then(() => {
     buildMenu();
     // idle diorama behind the menu
     const first = formById('crawler') || FORMS[0];
