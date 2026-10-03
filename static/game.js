@@ -1,7 +1,11 @@
 /* Boss vs You — 3D arena-battler client. Plain JS module, no bundler.
  *
+ * One immortal boss, four forms, no win condition. The menu goes straight
+ * into descent 1; a kill is a descent transition (new form, fresh pool),
+ * death ends the run.
+ *
  * DESIGNER HOOKS (stable names for a later visual pass):
- * DOM screens: #screen-menu, #screen-select, #screen-end (sections, .active shows)
+ * DOM screens: #screen-menu, #screen-end (sections, .active shows)
  * HUD: #hud, #hp-player-fill, #hp-player-num, #hp-boss-fill, #hp-boss-num,
  *   #boss-name, #clock, #cooldowns, #potion-count, #hint-bar
  * Controls: #joy-zone (+ #joy-base, #joy-knob), #btn-attack, #btn-special,
@@ -14,29 +18,51 @@
  *   dust, crack decals). Impact feel: hitstop freezes update for a beat on
  *   every landed hit (see hitstop()); shake is heavy on purpose; dust and
  *   cracks sell the weight. All comic, never gore: debris and dust only.
- * localStorage: 'bvy-ladder' (array of beaten boss ids, in ladder order)
- * Ladder order: ['smoke-courier', 'cinderjaw', 'briar-knight']
+ * localStorage: none. The old 'bvy-ladder' key (three-boss ladder progress)
+ *   existed only for the selection screen and is deleted with it; attempt
+ *   log / best-descent persistence land with the learning lane.
  *
  * Combat contract (matches bosses.py numbers exactly):
  * player HP 100, melee dmg 8 @ 0.6s, special 25 @ 12s, dash i-frames 0.25s @ 4s,
- * potion heal 30 x2. Brain ticks every ~8s, tactic switch >= 6s.
+ * potion heal 30 x2. Brain ticks every ~8s; tactics arrive as WEIGHTS and
+ * are sampled per decision (see sampleTactic); uniform floor until the first
+ * reply lands so the boss is never inert.
  *
  * Fight state (F) — single mutable per-run object:
  *   F.stats: live player numbers (maxHp, hp, damage, specialDmg, attackCd,
  *     specialCd, dashCd, dashCharges, speed, atkRange, specialRange,
  *     potionHeal, potionsLeft, level, xp, descent). Draft/level-up code
  *     mutates these live; nothing caches them elsewhere.
- *   F.boss: { hp, maxHp } — the current form's live pool. A mid-fight
- *     transform resets both. F.maxHp aliases F.boss.maxHp. Never use
+ *   F.boss: { form, hp, maxHp } — the current form's live pool. A transform
+ *     resets form/maxHp/hp together. F.maxHp aliases F.boss.maxHp. Never use
  *     F.cfg.hp for live math (it is the design-time value).
  *   F.paused: true while any menu/draft/overlay is open. Simulation
  *     (update + all deferred damage) freezes; rendering continues.
  *   F.lastAppliedSeq: seq guard — brain replies with seq <= this are stale.
+ *   F.transformedThisFight / F.pendingNextForm: client half of the
+ *     one-mid-fight-transform-per-fight rule (see applyBrain).
  */
 import { createArena } from './arena.js';
 
-const LADDER = ['smoke-courier', 'cinderjaw', 'briar-knight'];
+/* single immortal boss: forms arrive from /api/bosses, never hardcoded */
 const PX = 1 / 30; // legacy px -> world units (arena ~22 x 16 units)
+/* Boss tactics: sampled per decision from the brain's weights
+ * (weighted random over keys — Math.random against cumulative mass).
+ * Until the first reply lands, the uniform floor keeps the boss live. */
+const TACTIC_KEYS = ['pressure', 'bait', 'bombs'];
+const UNIFORM_TACTICS = { pressure: 1 / 3, bait: 1 / 3, bombs: 1 / 3 };
+function sampleTactic(weights) {
+  const w = weights || UNIFORM_TACTICS;
+  let total = 0;
+  for (const k of TACTIC_KEYS) total += Math.max(0, Number(w[k]) || 0);
+  if (total <= 0) return TACTIC_KEYS[Math.floor(Math.random() * TACTIC_KEYS.length)];
+  let r = Math.random() * total;
+  for (const k of TACTIC_KEYS) {
+    r -= Math.max(0, Number(w[k]) || 0);
+    if (r <= 0) return k;
+  }
+  return TACTIC_KEYS[0];
+}
 /* Base player numbers (fresh run, level 1). Copied into F.stats per fight —
  * F.stats is the live table from then on. */
 function defaultStats() {
@@ -49,13 +75,6 @@ function defaultStats() {
     level: 1, xp: 0, descent: 1,
   };
 }
-const SCORE_BASE = { 'smoke-courier': 1000, cinderjaw: 1500, 'briar-knight': 2000 };
-const STARS = { 'smoke-courier': 1, cinderjaw: 2, 'briar-knight': 3 };
-const PACE = {
-  'smoke-courier': 'FAST - slippery lunges + fake-outs',
-  cinderjaw: 'HEAVY - fire cones + skyfire rain',
-  'briar-knight': 'CRUEL - counters your mashing',
-};
 const KEYMAP = [
   ['Move', 'WASD / arrows / left stick'],
   ['Attack', 'J / Space'],
@@ -76,17 +95,8 @@ const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion:
 function css(colour) {
   return '#' + (colour >>> 0).toString(16).padStart(6, '0');
 }
-function scoreFor(bossId, secs, hpLeft) {
-  const base = SCORE_BASE[bossId] || 1000;
-  return Math.round(base + Math.max(0, 240 - secs) * 5 + clamp(hpLeft, 0, 100) * 10);
-}
-function loadLadder() {
-  try { return JSON.parse(localStorage.getItem('bvy-ladder') || '[]'); } catch (e) { return []; }
-}
-function saveLadder(a) { try { localStorage.setItem('bvy-ladder', JSON.stringify(a)); } catch (e) {} }
-function unlocked(id, beaten) {
-  if (id === LADDER[0]) return true;
-  return beaten.indexOf(LADDER[LADDER.indexOf(id) - 1]) !== -1;
+function scoreFor(secs, hpLeft) {
+  return Math.round(1500 + Math.max(0, 240 - secs) * 5 + clamp(hpLeft, 0, 100) * 10);
 }
 function api(path, opts) {
   return fetch(path, opts).then((r) => {
@@ -122,8 +132,10 @@ function domFlash() {
 }
 
 /* ---------- app state ---------- */
-let BOSSES = [];
-let state = 'menu'; // menu | select | fight | end
+let BOSS = null;   // the one immortal entity ({id, name, enrage, ...})
+let FORMS = [];    // form defs in legal order, from /api/bosses
+let ENRAGE = {};
+let state = 'menu'; // menu | fight | end
 let arena = null;
 let F = null; // fight state
 let fightSeq = 0;
@@ -154,7 +166,7 @@ function setPaused(v) {
 
 function showScreen(name) {
   state = name;
-  for (const s of ['menu', 'select', 'end']) {
+  for (const s of ['menu', 'end']) {
     $('screen-' + s).classList.toggle('active', s === name);
   }
   $('hud').classList.toggle('active', name === 'fight');
@@ -186,65 +198,29 @@ function say(line) {
   say._t = setTimeout(() => { if (bal) bal.classList.remove('show'); }, 2600);
 }
 
-/* ---------- menu / select / end ---------- */
-function bossById(id) { return BOSSES.find((b) => b.id === id) || null; }
+/* ---------- menu / end ---------- */
+function formById(id) { return FORMS.find((f) => f.id === id) || null; }
 
 function buildMenu() {
-  const beaten = loadLadder();
-  $('menu-status').textContent = beaten.length
-    ? 'Ladder: ' + beaten.length + ' / ' + LADDER.length + ' bosses fainted - keep going, hero.'
-    : 'Three bosses are waiting. The first one is already talking trash.';
-  $('btn-fight').onclick = () => { buildSelect(); showScreen('select'); };
-}
-
-function buildSelect() {
-  const beaten = loadLadder();
-  const wrap = $('boss-cards');
-  wrap.innerHTML = '';
-  BOSSES.forEach((b, i) => {
-    const ok = unlocked(b.id, beaten);
-    const done = beaten.indexOf(b.id) !== -1;
-    const card = document.createElement('button');
-    card.className = 'boss-card' + (ok ? '' : ' locked') + (done ? ' beaten' : '');
-    card.style.setProperty('--accent', css(b.colour));
-    const stars = [0, 1, 2].map((s) => (s < (STARS[b.id] || 1) ? '★' : '☆')).join('');
-    card.innerHTML =
-      '<span class="medal" aria-hidden="true">' + (ok ? b.glyph : '×') + '</span>' +
-      '<span class="boss-meta"><span class="boss-name">' + (i + 1) + '. ' +
-      b.name.toUpperCase() + '</span>' +
-      '<span class="boss-pace">' + stars + ' ' + (PACE[b.id] || '') + '</span>' +
-      '<span class="boss-title">' + (ok ? b.title : 'LOCKED - beat the previous boss.') + '</span>' +
-      '<span class="boss-tease">' + (ok ? '\u201C' + (b.taunt_voice[0] || '') + '\u201D' : '\u201C\u2026\u201D') + '</span></span>' +
-      '<span class="ribbon">' + (done ? '★ BEATEN' : ok ? (i === 0 && !beaten.length ? '▶ START HERE' : '▶ FIGHT') : '◆ LOCKED') + '</span>';
-    if (ok) card.onclick = () => startFight(b.id);
-    else card.disabled = true;
-    wrap.appendChild(card);
-  });
-  $('btn-back-menu').onclick = () => showScreen('menu');
+  $('menu-status').textContent = 'It is waiting below. It remembers you.';
+  $('btn-fight').onclick = () => startFight();
 }
 
 function showEnd(r) {
-  const beaten = loadLadder();
-  $('end-kicker').textContent = r.won ? '★ BOSS FAINTED ★' : 'SO CLOSE, HERO';
-  $('end-title').textContent = r.won ? 'WELL FOUGHT, HERO!' : 'THAT BOSS GOT LUCKY';
-  $('end-flavour').textContent = r.won
-    ? '\u201C' + r.cfg.title + '\u201D - not today.'
-    : '\u201C' + (r.cfg.taunt_voice[1] || 'That boss got lucky.') + '\u201D';
+  $('end-kicker').textContent = 'THE RUN ENDS';
+  $('end-title').textContent = 'IT GETS UP. YOU DO NOT.';
+  $('end-flavour').textContent = '\u201C' + (F.lastTaunt || 'Down here, hero.') + '\u201D';
   const m = Math.floor(r.secs / 60), s = Math.floor(r.secs % 60);
-  $('end-stats').innerHTML = r.won
-    ? statCard('TIME', m + ':' + String(s).padStart(2, '0')) +
-      statCard('HP LEFT', r.hpLeft + ' ♥') +
-      statCard('SCORE', String(r.score))
-    : '<p class="end-warm">You were learning its moves - every dodge counts.<br>One tap and you are back in. It is still scared of you.</p>';
-  $('end-ladder').textContent = 'Ladder: ' + beaten.length + ' / ' + LADDER.length + ' bosses fainted';
-  $('btn-rematch').onclick = () => startFight(r.bossId);
-  const next = LADDER[LADDER.indexOf(r.bossId) + 1];
+  $('end-stats').innerHTML =
+    statCard('TIME', m + ':' + String(s).padStart(2, '0')) +
+    statCard('DESCENT', String(F.stats.descent)) +
+    statCard('SCORE', String(r.score));
+  $('end-ladder').textContent = 'One life. No win. Descend again.';
+  $('btn-rematch').onclick = () => startFight();
   const nb = $('btn-next');
-  if (r.won && next && unlocked(next, beaten)) {
-    nb.style.display = '';
-    nb.onclick = () => startFight(next);
-  } else nb.style.display = 'none';
-  $('btn-bosses').onclick = () => { buildSelect(); showScreen('select'); };
+  if (nb) nb.style.display = 'none';
+  const bb = $('btn-bosses');
+  if (bb) bb.onclick = () => showScreen('menu');
   showScreen('end');
 
   function statCard(k, v) {
@@ -253,23 +229,26 @@ function showEnd(r) {
 }
 
 /* ---------- fight setup ---------- */
-function startFight(bossId) {
-  const cfg = bossById(bossId);
-  if (!cfg) { buildSelect(); showScreen('select'); return; }
+function startFight() {
+  const cfg = formById('crawler') || FORMS[0];
+  if (!cfg) return; // forms not loaded yet — menu stays until /api/bosses lands
   const mySeq = ++fightSeq;
   const W = arena.ARENA_X, H = arena.ARENA_Z;
   F = {
     cfg, mySeq,
+    bossId: (BOSS && BOSS.id) || 'the-thing-below',
     paused: false, pauseT0: 0,
     lastAppliedSeq: -1,
     stats: defaultStats(),
-    boss: { hp: cfg.hp, maxHp: cfg.hp },
+    boss: { form: cfg.id, hp: cfg.hp, maxHp: cfg.hp },
+    tacticWeights: null, lastNextForm: null, lastTaunt: '',
+    transformedThisFight: false, pendingNextForm: null, lastTransformT: -99,
     px: 0, pz: H - 2.5,
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
     dashDx: 0, dashDz: 0, dashing: 0, facing: Math.PI,
     bx: 0, bz: -H + 2.5, flyY: 0,
-    enraged: false, flying: false, stanceT: 0,
-    atkTmap: {}, tactic: cfg.tactics[0].id, speedMul: 1, dmgMul: 1, intensity: 0.5,
+    enraged: false, flying: false,
+    atkTmap: {}, tactic: 'pressure', speedMul: 1, dmgMul: 1, intensity: 0.5,
     over: false, won: false, startT: performance.now(), tick: 0,
     lastSwitch: -99, events: [], hist: [], brainTimer: 0, stopT: 0,
     projectiles: [], walls: [], projSeq: 0, wallSeq: 0,
@@ -283,31 +262,59 @@ function startFight(bossId) {
     set(v) { selfF.boss.maxHp = v; },
     configurable: true,
   });
-  arena.setBoss((cfg.visual && cfg.visual.recipe) || bossIdToRecipe(bossId), cfg.visual || {});
+  arena.setBoss((cfg.visual && cfg.visual.recipe) || 'courier', cfg.visual || {});
   arena.clearTelegraphs();
   arena.clearCracks();
   for (const pr of F.projectiles) arena.killProjectile(pr.id);
   for (const wl of F.walls) arena.killWall(wl.id);
   F.projectiles = []; F.walls = [];
   setVignette(false);
-  $('boss-name').textContent = '◆ ' + cfg.name.toUpperCase();
-  $('boss-name').style.color = css(cfg.colour);
-  $('boss-name').style.textShadow = '0 0 14px ' + css(cfg.colour) + ', 2px 2px 0 #000';
-  $('hint-bar').classList.toggle('show', loadLadder().length === 0);
+  setBossChrome(cfg);
+  $('hint-bar').classList.add('show');
   refreshPotions();
   showScreen('fight');
   resizeArena();
   /* boss intro splash */
-  showBanner('ROUND ' + (LADDER.indexOf(bossId) + 1) + ' OF ' + LADDER.length,
-    cfg.name.toUpperCase() + ' SMASHES IN!', cfg.title, css(cfg.colour));
-  say(cfg.taunt_voice[0] || ('I am ' + cfg.name + '!'));
+  showBanner('DESCENT 1 — IT WEARS ' + cfg.name.toUpperCase(),
+    cfg.name.toUpperCase() + ' RISES!', cfg.title, css(cfg.colour));
+  say((BOSS && BOSS.taunt_voice && BOSS.taunt_voice[0]) || ('I am ' + cfg.name + '!'));
   arena.shake(0.7);
   arena.dust(0, 0, 10, 0xd8c49a, 3);
   think(true);
 }
 
-function bossIdToRecipe(id) {
-  return { 'smoke-courier': 'courier', cinderjaw: 'cinderjaw', 'briar-knight': 'knight' }[id] || 'courier';
+function setBossChrome(def) {
+  $('boss-name').textContent = '◆ ' + (BOSS ? BOSS.name.toUpperCase() : 'THE THING') + ' — ' + def.name.toUpperCase();
+  $('boss-name').style.color = css(def.colour);
+  $('boss-name').style.textShadow = '0 0 14px ' + css(def.colour) + ', 2px 2px 0 #000';
+}
+
+/* Transform set-piece: flash, crack/shudder, silhouette rebuild, fresh pool,
+ * and a banner naming the new form AND its signature tell — the player must
+ * always be able to tell what the new move is and how to read it. */
+function doTransform(newForm, isMidFight) {
+  const def = formById(newForm);
+  if (!def || !F || newForm === F.boss.form) return false;
+  F.cfg = def;
+  F.boss.form = newForm;
+  F.boss.maxHp = def.hp;
+  F.boss.hp = def.hp;
+  F.enraged = false;
+  arena.setBoss((def.visual && def.visual.recipe) || 'courier', def.visual || {});
+  arena.clearTelegraphs(); // old windups die with the old body — never resolve stale
+  arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.6);
+  arena.dust(F.bx, F.bz, 14, 0xd8c49a, 4);
+  arena.shake(1.0);
+  domFlash();
+  setVignette(false);
+  setBossChrome(def);
+  const sig = def.attacks.find((a) => a.id === def.signature) || def.attacks[0];
+  showBanner((isMidFight ? 'IT BECOMES — ' : 'DESCENT ' + F.stats.descent + ' — ') + def.name.toUpperCase(),
+    'NEW MOVE: ' + sig.id.toUpperCase() + ' — ' + (sig.telegraph_ms / 1000).toFixed(2) + 's WINDUP',
+    def.title, css(def.colour));
+  say((BOSS && BOSS.taunt_voice && BOSS.taunt_voice[1]) || def.title);
+  F.events.push('boss became ' + newForm);
+  return true;
 }
 
 function later(ms, fn) {
@@ -346,21 +353,16 @@ function tryAttack(special) {
   const range = special ? S.specialRange : S.atkRange;
   const dmg = special ? S.specialDmg : S.damage;
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
-  if (F.stanceT > 0) { // riposte stance reflects damage (punish mashing)
-    hurtPlayer(Math.round(10 * F.dmgMul), 'countered!');
-    spawnPop(F.px, 1.8, F.pz, 'SMASHED!', 'bad');
-    arena.shake(0.6);
-    return;
-  }
   const reach = range + 1.1;
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
-    F.boss.hp -= dmg;
+    const eff = Math.max(1, dmg - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
+    F.boss.hp -= eff;
     F.events.push(special ? 'boss hit by special' : 'boss hit');
     hitstop(special ? 0.09 : 0.05);
     arena.burst(F.bx, F.bz, special ? 0xffd75e : 0xffffff, special ? 14 : 9, 4.5, 1.0 + F.flyY);
     arena.dust(F.bx, F.bz, special ? 12 : 7);
     if (special) arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.0);
-    spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'WHAM! -' : 'THWACK! -') + dmg, special ? 'special' : 'hit');
+    spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'WHAM! -' : 'THWACK! -') + eff, special ? 'special' : 'hit');
     if (!REDUCED) arena.shake(special ? 0.6 : 0.35);
     else domFlash();
   } else {
@@ -423,30 +425,41 @@ function logHist(kind) {
   if (!F) return;
   F.hist.push({ t: performance.now() / 1000, kind });
 }
-function playerStyle() {
-  if (!F) return 'mobile';
-  const now = performance.now() / 1000;
-  let atk = 0, dash = 0;
-  F.hist = F.hist.filter((h) => now - h.t < 10);
-  for (const h of F.hist) { if (h.kind === 'atk') atk++; if (h.kind === 'dash') dash++; }
-  if (atk >= 8 || dash >= 4) return 'aggressive';
-  if (F.moved10 < 20 && atk < 4) return 'turtly';
-  return 'mobile';
-}
 
 /* ---------- brain ---------- */
+/* Habit counters, derived client-side (no model tokens spent on arithmetic):
+ * stillness vs motion, swing rate, dash rate. The model reads these. */
+function habits() {
+  if (!F) return {};
+  const now = performance.now() / 1000;
+  F.hist = F.hist.filter((h) => now - h.t < 10);
+  let atk = 0, dash = 0;
+  for (const h of F.hist) { if (h.kind === 'atk') atk++; if (h.kind === 'dash') dash++; }
+  return {
+    turtle_ratio: clamp(1 - F.moved10 / 60, 0, 1),
+    stationary_ratio: clamp(1 - F.moved10 / 60, 0, 1),
+    aggression: clamp(atk / 8, 0, 1),
+    dash_spam: clamp(dash / 4, 0, 1),
+  };
+}
 function think(first) {
   if (!F || F.over || F.paused) return; // paused: no new brain ticks while a menu is open
   const self = F;
   const bossPct = Math.max(0, (self.boss.hp / self.boss.maxHp) * 100);
+  const now = performance.now() / 1000;
   const phase = bossPct < 30 ? 'enrage' : 'normal';
   if (phase === 'enrage' && !self.enraged) enterEnrage();
   const seq = self.tick++;
   const body = {
-    boss_id: self.cfg.id, tick: seq, seq,
+    boss_id: self.bossId, tick: seq, seq,
+    descent: self.stats.descent, form: self.boss.form,
     boss_hp_pct: Math.round(bossPct), player_hp_pct: Math.round(Math.max(0, self.stats.hp)),
-    player_style: playerStyle(), current_tactic: self.tactic,
-    phase, threats: self.events.slice(-6),
+    habits: habits(), build: [],
+    fight_secs: (performance.now() - self.startT) / 1000,
+    last_damage_source: self.events.length ? self.events[self.events.length - 1] : '',
+    history: self.events.slice(-4),
+    transforms_this_fight: self.transformedThisFight ? 1 : 0,
+    secs_since_transform: now - (self.lastTransformT || -99),
   };
   self.events = [];
   api('/api/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -457,23 +470,47 @@ function think(first) {
 /* Single choke point for brain replies. Drops any reply with
  * seq <= F.lastAppliedSeq so a slow 6–23s response can never overwrite
  * fresher state. Replies without a seq (current server) always apply.
- * Safe while paused: tactic/intensity/taunt never mutate HP or positions. */
+ * Safe while paused: tactic/taunt/transform bookkeeping never mutates
+ * HP or positions directly (the transform path rebuilds via doTransform).
+ *
+ * Rate limit lives on BOTH sides: the server gates transform_now for
+ * shape/legality (same-form, low-descent, lockout) against the count the
+ * client reports, but only the client knows its live fight count in real
+ * time — so a transform_now already honoured this fight is ignored here
+ * and held as pendingNextForm for the next descent transition instead. */
 function applyBrain(out, ctx) {
   if (!out || !F || F.mySeq !== ctx.mySeq || F.over) return;
   const seq = typeof out.seq === 'number' ? out.seq : ctx.seq;
   if (seq <= F.lastAppliedSeq) return; // stale reply — ignore
   F.lastAppliedSeq = seq;
-  const now = performance.now() / 1000;
-  if (out.tactic_id && out.tactic_id !== F.tactic && (ctx.first || now - F.lastSwitch >= 6)) {
-    F.tactic = out.tactic_id;
-    F.lastSwitch = now;
+  if (out.tactics && typeof out.tactics === 'object') {
+    let total = 0;
+    const w = {};
+    for (const k of TACTIC_KEYS) {
+      const v = Number(out.tactics[k]);
+      w[k] = (isFinite(v) && v > 0) ? v : 0;
+      total += w[k];
+    }
+    if (total > 0) F.tacticWeights = w; // else keep previous (or uniform floor)
   }
-  if (out.taunt) say(out.taunt);
+  if (typeof out.next_form === 'string' && formById(out.next_form)) {
+    F.lastNextForm = out.next_form;
+  }
+  if (out.transform_now && F.lastNextForm && F.lastNextForm !== F.boss.form) {
+    if (!F.transformedThisFight) {
+      F.transformedThisFight = true;
+      F.lastTransformT = performance.now() / 1000;
+      doTransform(F.lastNextForm, true);
+    } else {
+      F.pendingNextForm = F.lastNextForm;
+    }
+  }
+  if (out.taunt) { F.lastTaunt = out.taunt; say(out.taunt); }
   if (typeof out.intensity === 'number') F.intensity = out.intensity;
 }
 
 function enterEnrage() {
-  const e = F.cfg.enrage || {};
+  const e = ENRAGE || {};
   F.enraged = true;
   F.speedMul = e.speed_mult || 1.25;
   F.dmgMul = e.damage_mult || 1.25;
@@ -484,7 +521,7 @@ function enterEnrage() {
   setVignette(true);
   domFlash();
   const line = (e.taunts && e.taunts[0]) || 'Enough, hero - my real power!';
-  showBanner('!! ' + F.cfg.name.toUpperCase() + ' ENRAGED !!', 'BELOW 30% - NO MERCY', line, '#ff3b30');
+  showBanner('!! IT IS ENRAGED !!', 'BELOW 30% - NO MERCY', line, '#ff3b30');
   say(line);
 }
 
@@ -495,33 +532,36 @@ function bossCooldown(a) {
   const cd = a.cooldown_s / (F.enraged ? 1.2 : 1);
   return now - last >= cd;
 }
-function tacticPrefs() {
-  const t = F.tactic || '';
-  if (/pressure|combo|aggressive|relentless/.test(t)) return { want: ['melee', 'lunge'], near: true };
-  if (/bomb|barrage|wall|herd|aerial|corner/.test(t)) return { want: ['aoe_circle', 'projectile', 'cone', 'summon'], near: false };
-  return { want: ['melee', 'lunge', 'aoe_circle'], near: true };
+function tacticPrefs(t) {
+  if (t === 'pressure') return { want: ['melee', 'lunge'], near: true };
+  if (t === 'bombs') return { want: ['aoe_circle', 'projectile', 'cone'], near: false };
+  return { want: ['lunge', 'aoe_circle', 'melee'], near: true }; // bait holds ground, punishes the approach
 }
+/* Per decision: sample a tactic from the brain's weights (uniform floor
+ * until the first reply), then a weighted attack from the form's kit
+ * biased toward that tactic's patterns. Weighted random, both levels. */
 function bossAct() {
   if (!F || F.over || F.paused) return; // paused: no new attacks scheduled
-  const prefs = tacticPrefs();
+  const t = sampleTactic(F.tacticWeights);
+  F.tactic = t;
+  const prefs = tacticPrefs(t);
   const d = dist2(F.px, F.pz, F.bx, F.bz);
   const cands = F.cfg.attacks.filter((a) =>
-    bossCooldown(a) && (a.pattern === 'projectile' || a.pattern === 'summon' ||
-      a.pattern === 'aoe_circle' || a.pattern === 'cone' || d <= a.range_px * PX + 2));
+    bossCooldown(a) && (a.pattern === 'projectile' ||
+      a.range_px >= 9999 || d <= a.range_px * PX + 2));
   if (!cands.length) return;
-  cands.sort((a, b) => (prefs.want.indexOf(b.pattern) !== -1) - (prefs.want.indexOf(a.pattern) !== -1));
-  const a = Math.random() < 0.7 ? cands[0] : cands[Math.floor(Math.random() * cands.length)];
-  F.atkTmap[a.id] = performance.now() / 1000;
-  if (a.id === 'decoy-feint' && Math.random() < 0.35) { telegraph(a, true); return; } // fake!
-  if (a.id === 'riposte-stance') {
-    F.stanceT = 1.5;
-    arena.setRiposte(true);
-    say('Come on, hero. Swing into the thorns.');
-    F.events.push('boss countered');
-    /* later() defers while paused — stance expiry freezes with the world */
-    later(1500, () => { F.stanceT = 0; arena.setRiposte(false); });
-    return;
+  const weights = cands.map((a) => {
+    const fw = (F.cfg.weights && F.cfg.weights[a.id]) || 0.1;
+    return fw * (prefs.want.indexOf(a.pattern) !== -1 ? 1.5 : 0.6);
+  });
+  let r = Math.random() * weights.reduce((s, w) => s + w, 0);
+  let a = cands[0];
+  for (let i = 0; i < cands.length; i++) {
+    r -= weights[i];
+    if (r <= 0) { a = cands[i]; break; }
   }
+  F.atkTmap[a.id] = performance.now() / 1000;
+  if (a.feint_chance && Math.random() < a.feint_chance) { telegraph(a, true); return; } // hollow lies
   telegraph(a, false);
 }
 
@@ -543,8 +583,8 @@ function telegraph(a, fake) {
   }
   const h = arena.spawnTelegraph(spec);
   const anchor = { ...spec, dirX: Math.sin(spec.angle || 0), dirZ: Math.cos(spec.angle || 0) };
-  if (fake && a.id === 'decoy-feint') {
-    arena.spawnDecoys([[F.bx - 2, F.bz + 1], [F.bx + 2, F.bz + 1]]);
+  if (fake) {
+    arena.spawnDecoys([[F.bx - 2, F.bz + 1], [F.bx + 2, F.bz + 1]]); // afterimages sell the lie
   }
   later(windup * 1000, () => {
     /* Pause-aware via later(): this windup cannot resolve while a menu is open. */
@@ -576,8 +616,17 @@ function resolveAttack(a, t) {
     arena.dust(t.x, t.z, 8, 0xd8c49a, 5); // erupting thorns kick dirt
     arena.shake(0.4);
   } else if (a.pattern === 'lunge') {
-    F.bx = clamp(F.bx + (F.px - F.bx) * 0.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
-    F.bz = clamp(F.bz + (F.pz - F.bz) * 0.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+    if (a.id === 'blink') {
+      // wraith teleport-strike: it is simply THERE now (ignores floor hazards)
+      const dx = F.px - F.bx, dz = F.pz - F.bz;
+      const m = Math.hypot(dx, dz) || 1;
+      F.bx = clamp(F.px - (dx / m) * 1.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
+      F.bz = clamp(F.pz - (dz / m) * 1.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+      arena.burst(F.bx, F.bz, 0x9fd8e8, 10, 3);
+    } else {
+      F.bx = clamp(F.bx + (F.px - F.bx) * 0.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
+      F.bz = clamp(F.bz + (F.pz - F.bz) * 0.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+    }
     arena.dust(F.bx, F.bz, 6); // landing thud kicks grit even on a miss
     if (dist2(F.px, F.pz, F.bx, F.bz) < 80 * PX) hurtPlayer(dmg, a.id);
     else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
@@ -593,17 +642,13 @@ function resolveAttack(a, t) {
     } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   } else {
     const R = a.pattern === 'melee' ? 70 * PX : a.range_px * PX * 0.55;
-    if (a.damage === 0) { // decoy-feint follow-through: scary, harmless
-      F.events.push('boss feinted');
-      spawnPop(F.px, 1.8, F.pz, 'PSYCH!', 'miss');
-      return;
-    }
     if (dist2(F.px, F.pz, t.x, t.z) < R + 14 * PX) {
       hurtPlayer(dmg, a.id);
       arena.burst(t.x, t.z, 0xff5a4e, 8, 4);
-      if (a.pattern === 'aoe_circle') { // slam craters the floor
-        arena.spawnCrack(t.x, t.z, Math.random() * Math.PI * 2, 1.2);
-        arena.dust(t.x, t.z, 10, 0xd8c49a, 4);
+      if (a.pattern === 'aoe_circle') { // slams crater the floor
+        arena.spawnCrack(t.x, t.z, Math.random() * Math.PI * 2, a.id === 'slam' ? 1.8 : 1.2);
+        arena.dust(t.x, t.z, a.id === 'slam' ? 16 : 10, 0xd8c49a, 4);
+        if (a.id === 'slam') arena.shake(0.8);
       }
     } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   }
@@ -640,25 +685,13 @@ function update(dt) {
   F.pz = clamp(F.pz, -H + 0.7, H - 0.7);
   arena.heroPos(F.px, F.pz, F.facing, now < F.ifrT, F.dashing > 0);
 
-  // flight phase: cinderjaw takes to the sky at 50%
-  if (F.cfg.id === 'cinderjaw' && !F.flying && F.boss.hp < F.boss.maxHp * 0.5) {
-    F.flying = true;
-    arena.setFlight(true);
-    showBanner('CINDERJAW TAKES FLIGHT', 'WINGS UP - THE SKY IS HERS', 'she rains skyfire: keep moving, hero', '#ff7a3c');
-    setVignette(true);
-    say('WINGS UP, hero - the sky is MINE!');
-    F.events.push('boss took flight');
-    think();
-  }
-  F.flyY += ((F.flying ? 4 : 0) - F.flyY) * Math.min(1, dt * 1.6);
-
-  // boss movement: approach / strafe by tactic
-  const prefs = tacticPrefs();
+  // boss movement: approach / strafe by sampled tactic
+  const prefs = tacticPrefs(F.tactic || 'pressure');
   const dx = F.px - F.bx, dz = F.pz - F.bz;
   const d = Math.hypot(dx, dz) || 1;
   const nx = dx / d, nz = dz / d;
-  const want = (F.flying || !prefs.near) ? 8.5 : 2.3;
-  const bs = F.cfg.move_speed * PX * F.speedMul * (F.flying ? 1.15 : 1);
+  const want = !prefs.near ? 8.5 : 2.3;
+  const bs = F.cfg.move_speed * PX * F.speedMul;
   const dir = d > want + 0.7 ? 1 : (d < want - 0.7 ? -1 : 0);
   const strafe = Math.sin(now * 1.3) * 0.7;
   F.bx = clamp(F.bx + (nx * dir - nz * strafe * 0.5) * bs * dt, -W + 1, W - 1);
@@ -706,8 +739,9 @@ function update(dt) {
     bal.style.top = (p.y - rect.top) + 'px';
   }
 
-  // endings: opponents FAINT, never die
-  if (F.boss.hp <= 0) finish(true);
+  // endings: the boss is immortal (a kill is a descent transition),
+  // the player has one life (death ends the run)
+  if (F.boss.hp <= 0) killBoss();
   else if (F.stats.hp <= 0) finish(false);
 }
 
@@ -735,26 +769,38 @@ function setBar(id, v, max) {
   $(id + '-num').textContent = Math.max(0, Math.round(v)) + ' / ' + max;
 }
 
+/* A kill is a descent transition, not a victory: the boss always gets
+ * up. Honour any transform the client held back (pendingNextForm), else
+ * the brain's last next_form, else keep wearing this body with a fresh
+ * pool. The mid-fight budget resets — every descent gets one set-piece. */
+function killBoss() {
+  if (F.over) return;
+  const d = ++F.stats.descent;
+  F.transformedThisFight = false;
+  const returnForm = F.pendingNextForm || F.lastNextForm || F.boss.form;
+  F.pendingNextForm = null;
+  arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
+  if (returnForm !== F.boss.form) {
+    doTransform(returnForm, false);
+  } else {
+    F.boss.maxHp = F.cfg.hp;
+    F.boss.hp = F.cfg.hp;
+    showBanner('DESCENT ' + d, F.cfg.name.toUpperCase() + ' GETS UP', 'same body. hungrier.', css(F.cfg.colour));
+  }
+  think(); // load-bearing decisions move to the between-fight window
+}
+
 function finish(won) {
   if (F.over) return;
   F.over = true;
   F.won = won;
   setVignette(false);
-  arena.setRiposte(false);
   arena.clearDecoys();
   const secs = (performance.now() - F.startT) / 1000;
   const hpLeft = Math.max(0, Math.round(F.stats.hp));
-  const score = won ? scoreFor(F.cfg.id, secs, hpLeft) : 0;
-  const r = { bossId: F.cfg.id, cfg: F.cfg, won, secs, hpLeft, score };
-  if (won) {
-    const beaten = loadLadder();
-    if (beaten.indexOf(F.cfg.id) === -1) { beaten.push(F.cfg.id); saveLadder(beaten); }
-    say('*faints dramatically* ...well fought, hero!');
-    showBanner('★ ' + F.cfg.name.toUpperCase() + ' FAINTED ★', 'WELL FOUGHT, HERO!', 'worth sending to your brother', '#ffd75e');
-    arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
-  } else {
-    showBanner('SO CLOSE, HERO', 'THAT BOSS GOT LUCKY', 'shake it off - you were learning its moves', '#ff5a4e');
-  }
+  const score = scoreFor(secs, hpLeft);
+  const r = { won, secs, hpLeft, score };
+  showBanner('SO CLOSE, HERO', 'THAT THING GOT LUCKY', 'shake it off - you were learning its moves', '#ff5a4e');
   const mySeq = F.mySeq;
   /* Pause-aware: the end screen waits out any open overlay instead of stacking on it. */
   const show = () => {
@@ -762,7 +808,7 @@ function finish(won) {
     if (F.paused) { setTimeout(show, 200); return; }
     showEnd(r);
   };
-  setTimeout(show, won ? 1200 : 600);
+  setTimeout(show, 600);
 }
 
 /* ---------- input: joystick + buttons + keyboard ---------- */
@@ -874,13 +920,14 @@ function boot() {
   };
 
   api('/api/bosses').then((data) => {
-    BOSSES = data.bosses;
+    BOSS = data.boss || (data.bosses && data.bosses[0]);
+    FORMS = data.forms || data.bosses || [];
+    ENRAGE = (BOSS && BOSS.enrage) || {};
     buildMenu();
-    buildSelect();
     // idle diorama behind the menu
-    const first = bossById('smoke-courier') || BOSSES[0];
+    const first = formById('crawler') || FORMS[0];
     if (first) {
-      arena.setBoss((first.visual && first.visual.recipe) || bossIdToRecipe(first.id), first.visual || {});
+      arena.setBoss((first.visual && first.visual.recipe) || 'courier', first.visual || {});
       arena.heroPos(3.2, 2.5, -0.6, false, false);
       arena.bossPos(-3.0, -2.5);
       arena.bossFace(0.6);

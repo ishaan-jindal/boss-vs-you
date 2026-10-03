@@ -23,7 +23,7 @@ def keyless(monkeypatch):
 
 def req(**kw) -> BrainRequest:
     base = dict(
-        boss_id="smoke-courier",
+        boss_id=bosses.BOSS_ID,
         seq=0,
         descent=1,
         form="crawler",
@@ -82,8 +82,12 @@ def test_stub_turtle_vs_aggro_differ():
 
 def test_stub_transform_now_only_when_bleeding():
     assert stub_decide(req(habits={"turtle_ratio": 0.9})).transform_now is False
-    out = stub_decide(req(habits={"turtle_ratio": 0.9}, boss_hp_pct=20.0))
+    out = stub_decide(req(habits={"turtle_ratio": 0.9}, boss_hp_pct=20.0, descent=5))
     assert out.transform_now is True
+    # Same bleed at descent 1: server-side rule holds the morph for return.
+    low = stub_decide(req(habits={"turtle_ratio": 0.9}, boss_hp_pct=20.0, descent=1))
+    assert low.transform_now is False
+    assert low.next_form == "wraith"  # the body is kept, only the timing is held
 
 
 def _modelled(monkeypatch, fields=None, error=None):
@@ -135,12 +139,21 @@ def test_negative_weights_fall_back(monkeypatch):
 
 
 def test_transform_now_passes_through(monkeypatch):
-    # Server passes transform_now through; the CLIENT enforces the rate limit.
+    # Server gates shape/legality (same-form, low-descent, lockout); a legal
+    # morph passes through, the CLIENT enforces the per-fight count.
     _modelled(monkeypatch, _fields(transform_now=True))
-    out = asyncio.run(decide(req()))
+    out = asyncio.run(decide(req(descent=5)))
     assert out.transform_now is True
     assert out.open_with == "shadow-lunge"
     assert out.seq == 0
+
+
+def test_transform_now_gated_at_low_descent(monkeypatch):
+    # Same model reply, descent 1: morph held for the return window.
+    _modelled(monkeypatch, _fields(transform_now=True))
+    out = asyncio.run(decide(req(descent=1)))
+    assert out.transform_now is False
+    assert out.next_form == "wraith"
 
 
 def test_retry_once_then_model_win(monkeypatch):
@@ -250,25 +263,17 @@ def test_bosses_endpoint():
     client = TestClient(create_app())
     r = client.get("/api/bosses")
     assert r.status_code == 200
-    data = r.json()["bosses"]
-    assert len(data) == 3
-    for b in data:
-        for f in (
-            "id",
-            "name",
-            "title",
-            "hp",
-            "move_speed",
-            "colour",
-            "glyph",
-            "attacks",
-            "tactics",
-            "taunt_voice",
-            "enrage",
-        ):
-            assert f in b, f"boss {b.get('id')} missing {f}"
-        for a in b["attacks"]:
-            for f in (
+    data = r.json()
+    # One immortal entity; the legal form list rides along.
+    assert len(data["bosses"]) == 1
+    assert data["boss"]["id"] == bosses.BOSS_ID
+    assert [f["id"] for f in data["forms"]] == bosses.FORMS
+    for f in data["forms"]:
+        assert f["id"] in bosses.FORMS
+        for key in ("name", "signature", "attacks", "weights", "visual"):
+            assert key in f, f"form {f.get('id')} missing {key}"
+        for a in f["attacks"]:
+            for key in (
                 "id",
                 "damage",
                 "telegraph_ms",
@@ -276,7 +281,7 @@ def test_bosses_endpoint():
                 "range_px",
                 "pattern",
             ):
-                assert f in a
+                assert key in a
 
 
 def test_health_fast():
@@ -291,10 +296,10 @@ def test_health_fast():
 
 
 def test_score_formula():
-    # base + time bonus + hp bonus, stated plainly.
-    assert score_for("smoke-courier", 240, 0) == 1000
-    assert score_for("smoke-courier", 120, 50) == 1000 + 600 + 500
-    assert score_for("cinderjaw", 100, 80) == 1500 + 700 + 800
-    assert score_for("briar-knight", 60, 100) == 2000 + 900 + 1000
-    # slow fights get no time bonus, never negative
-    assert score_for("cinderjaw", 999, 0) == 1500
+    # base + time bonus + hp bonus, stated plainly. One boss, one base.
+    assert score_for(bosses.BOSS_ID, 240, 0) == 1500
+    assert score_for(bosses.BOSS_ID, 120, 50) == 1500 + 600 + 500
+    assert score_for(bosses.BOSS_ID, 100, 80) == 1500 + 700 + 800
+    # slow fights get no time bonus, never negative; unknown ids floor at 1000
+    assert score_for(bosses.BOSS_ID, 999, 0) == 1500
+    assert score_for("nope", 999, 0) == 1000

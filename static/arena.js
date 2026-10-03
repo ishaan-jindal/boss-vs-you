@@ -359,7 +359,43 @@ function buildKnight(pal) {
   return g;
 }
 
-const BUILDERS = { hero: buildHero, courier: buildCourier, cinderjaw: buildCinderjaw, knight: buildKnight };
+/* Hollow: the same wrongness, split. Two offset slabs that never quite
+ * line up, flickering a half-step apart — the tell is the jitter itself. */
+function buildHollow(pal) {
+  const g = new THREE.Group();
+  const bodyM = toon(pal.body ?? 0x1d3a24);
+  const darkM = toon(pal.dark ?? 0x0e1f14);
+  const slabL = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.5, 0.6), bodyM);
+  slabL.position.set(-0.3, 1.0, 0);
+  slabL.rotation.z = 0.08;
+  const slabR = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.3, 0.6), darkM);
+  slabR.position.set(0.32, 1.05, 0.05);
+  slabR.rotation.z = -0.1;
+  const crown = new THREE.Mesh(new THREE.ConeGeometry(0.5, 0.7, 5), darkM);
+  crown.position.set(0, 2.05, 0);
+  const eyeM = new THREE.MeshBasicMaterial({ color: pal.eye ?? 0xb6ff9e });
+  const eL = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.1, 0.05), eyeM);
+  eL.position.set(-0.32, 1.45, 0.32);
+  const eR = eL.clone();
+  eR.position.x = 0.3;
+  eL.userData.isShell = eR.userData.isShell = true;
+  const spikeM = toon(0x0a140d);
+  const joints = [];
+  for (let i = 0; i < 4; i++) {
+    const j = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.4, 5), spikeM);
+    const a = (i / 4) * Math.PI * 2 + 0.4;
+    j.position.set(Math.cos(a) * 0.55, 0.7 + (i % 2) * 0.5, Math.sin(a) * 0.4);
+    j.rotation.z = -Math.cos(a) * 0.5;
+    g.add(j);
+    joints.push(j);
+  }
+  g.add(slabL, slabR, crown, eL, eR);
+  addOutline(g);
+  g.userData = { slabL, slabR, hollow: true, flick: Math.random() * 10 };
+  return g;
+}
+
+const BUILDERS = { hero: buildHero, courier: buildCourier, cinderjaw: buildCinderjaw, knight: buildKnight, hollow: buildHollow };
 
 export function createArena(canvas, opts = {}) {
   const reducedMotion = !!opts.reducedMotion;
@@ -820,6 +856,12 @@ export function createArena(canvas, opts = {}) {
     }
     if (boss && k) {
       const bu = boss.userData;
+      if (bu.hollow) {
+        // split-silhouette flicker: slabs jitter a half-step apart, never still
+        bu.flick += dt * 9;
+        bu.slabL.position.x = -0.3 + Math.sin(bu.flick) * 0.05;
+        bu.slabR.position.x = 0.32 + Math.sin(bu.flick * 1.3 + 1) * 0.06;
+      }
       if (bu.wL) {
         const flap = Math.sin(t * (flyTarget > 0 ? 9 : 3.5)) * 0.4;
         bu.wL.rotation.x = flap * 0.5;

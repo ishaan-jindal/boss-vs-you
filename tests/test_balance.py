@@ -78,4 +78,8 @@ def test_balance_endpoint_agrees_with_module():
     r = client.get("/api/balance")
     assert r.status_code == 200
     body = r.json()
-    assert body == {**bal.balance_summary(), "forms": bosses.FORMS}
+    assert body == {
+        **bal.balance_summary(),
+        "forms": bosses.FORMS,
+        "transform": bosses.TRANSFORM_RULES,
+    }

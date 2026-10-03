@@ -26,6 +26,13 @@ class BrainRequest(BaseModel):
     fight_secs: float = 0.0
     last_damage_source: str = ""
     history: list[str] = Field(default_factory=list)
+    # Transform state, reported by the client each call (stateless server):
+    # how many mid-fight morphs this fight has honoured, and seconds since
+    # the last one (large on descent transitions). The server gates
+    # transform_now against can_transform; the client enforces the same
+    # count because only it knows its fight in real time.
+    transforms_this_fight: int = 0
+    secs_since_transform: float = 1e9
 
 
 class BrainResponse(BaseModel):
@@ -39,22 +46,12 @@ class BrainResponse(BaseModel):
     intensity: float = 0.7
 
 
-# Stub taunts per boss (all clean, grim dungeon register, in-voice).
+# Stub taunts for the one immortal boss (all clean, grim dungeon register).
 STUB_TAUNTS: dict[str, list[str]] = {
-    "smoke-courier": [
-        "You run messages through smoke, hero. I read every one.",
-        "That dash kicks dust. The dark keeps count.",
-        "Hide behind the gloom again. It will not hide you.",
-    ],
-    "cinderjaw": [
-        "Little ember, well done — come closer to the flame.",
-        "I swallowed whole war-bands. You are one mouthful.",
+    bosses.BOSS_ID: [
+        "You wear me down, hero. I wear it better.",
+        "That dodge kicked dust. The dark keeps count.",
         "Bleed on the stone, hero. Feed the floor.",
-    ],
-    "briar-knight": [
-        "Swing, swing. My thorns keep count of every cut.",
-        "Patience is a grave-garden, and you walked into it.",
-        "That guard is a coffin lid. I am the nails.",
     ],
 }
 
@@ -121,8 +118,20 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
         read = "you mix ranges and tempo; it will press and probe for a habit"
 
     # A mid-fight morph is a set-piece, not a tick: only bleed-driven, and
-    # the client rate-limits to one per fight regardless.
-    transform_now = next_form != _fallback_form(req) and req.boss_hp_pct < 30
+    # gated by the same server-side rules the model path enforces (the
+    # client rate-limits to one per fight regardless — both sides, §bosses).
+    wants_morph = next_form != _fallback_form(req) and req.boss_hp_pct < 30
+    if wants_morph:
+        ok, _ = bosses.can_transform(
+            _fallback_form(req),
+            next_form,
+            req.secs_since_transform,
+            req.descent,
+            req.transforms_this_fight,
+        )
+        transform_now = ok
+    else:
+        transform_now = False
     open_with = max(TACTIC_KEYS, key=lambda k: tactics[k])
     taunts = STUB_TAUNTS.get(req.boss_id, [DEFAULT_TAUNT])
     taunt = taunts[req.seq % len(taunts)]
@@ -142,6 +151,7 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
 def build_prompt(req: BrainRequest) -> str:
     b = bosses.get_boss(req.boss_id) or {}
     voice = "\n".join(f'- "{line}"' for line in b.get("taunt_voice", []))
+    form = bosses.FORM_DEFS.get(req.form, {})
     habits = (
         "; ".join(f"{k}={v:.2f}" for k, v in sorted(req.habits.items())) or "none yet"
     )
@@ -154,9 +164,17 @@ def build_prompt(req: BrainRequest) -> str:
         "and you learn.\n"
         f"{SAFETY_RULES}\n"
         f"Your bodies (reply with EXACTLY one of these ids): "
-        f"{', '.join(bosses.FORMS)}. Crawler is baseline melee, wraith is fast "
-        "and punishes turtling, colossus is armoured and punishes trading hits, "
-        "hollow is erratic and punishes pattern.\n"
+        f"{', '.join(bosses.FORMS)}. "
+        f"Crawler ({bosses.FORM_DEFS['crawler']['identity']}) is baseline melee, "
+        f"wraith ({bosses.FORM_DEFS['wraith']['identity']}) is fast "
+        "and punishes turtling, "
+        f"colossus ({bosses.FORM_DEFS['colossus']['identity']}) is armoured "
+        "and punishes trading hits, "
+        f"hollow ({bosses.FORM_DEFS['hollow']['identity']}) is erratic "
+        "and punishes pattern.\n"
+        f"It currently wears {req.form} "
+        f"({form.get('identity', 'unknown')}, signature {form.get('signature', '?')} "
+        f"with a {form.get('signature_tell', '?')}ms tell) — taunt in that voice.\n"
         f"Your voice (match this flavour):\n{voice}\n"
         f"State: seq={req.seq} descent={req.descent} form={req.form} "
         f"boss_hp={req.boss_hp_pct:.0f}% hero_hp={req.player_hp_pct:.0f}% "
@@ -192,15 +210,28 @@ def _legal(req: BrainRequest, out) -> bool:
 def _respond(req: BrainRequest, out) -> BrainResponse:
     # Defensive re-derivation: legal replies pass through unchanged; illegal
     # weights/form resolve to the deterministic floor instead of a 500.
+    # transform_now is additionally gated by the server-side transform rules
+    # (no-op / rate limit / low-descent / lockout): a model that demands an
+    # illegal morph gets its next_form kept for the return window instead.
     tactics = dict(out.tactics) if _weights_ok(out.tactics) else _uniform_weights()
     next_form = (
         out.next_form if bosses.legal_form(out.next_form) else _fallback_form(req)
     )
+    transform_now = bool(out.transform_now)
+    if transform_now:
+        ok, _ = bosses.can_transform(
+            _fallback_form(req),
+            next_form,
+            req.secs_since_transform,
+            req.descent,
+            req.transforms_this_fight,
+        )
+        transform_now = ok
     return BrainResponse(
         seq=req.seq,
         tactics=tactics,
         next_form=next_form,
-        transform_now=bool(out.transform_now),
+        transform_now=transform_now,
         open_with=out.open_with or "",
         taunt=out.taunt,
         read=out.read or "",
@@ -232,15 +263,12 @@ async def decide(req: BrainRequest) -> BrainResponse:
 
 
 def score_for(boss_id: str, fight_seconds: float, player_hp_remaining: float) -> int:
-    """Score = base per boss + time bonus + HP-remaining bonus, stated plainly.
+    """Score = base for the one boss + time bonus + HP-remaining bonus.
 
-    base: smoke-courier 1000, cinderjaw 1500, briar-knight 2000.
-    time_bonus: max(0, 240 - fight_seconds) * 5 (faster wins pay, capped at 4 min).
-    hp_bonus: player_hp_remaining (0-100) * 10.
+    base: 1500. time_bonus: max(0, 240 - fight_seconds) * 5. hp_bonus:
+    player_hp_remaining (0-100) * 10. Unknown ids score the old 1000 floor.
     """
-    base = {"smoke-courier": 1000, "cinderjaw": 1500, "briar-knight": 2000}.get(
-        boss_id, 1000
-    )
+    base = 1500 if boss_id == bosses.BOSS_ID else 1000
     time_bonus = max(0.0, 240.0 - fight_seconds) * 5
     hp_bonus = max(0.0, min(100.0, player_hp_remaining)) * 10
     return int(base + time_bonus + hp_bonus)

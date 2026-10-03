@@ -26,12 +26,23 @@ def create_app() -> FastAPI:
 
     @app.get("/api/bosses")
     async def list_bosses() -> dict:
-        return {"bosses": bosses.BOSSES}
+        # One immortal entity; the legal form list rides along so the client
+        # never hardcodes bodies. "bosses" stays as a one-item alias.
+        return {
+            "bosses": bosses.BOSSES,
+            "boss": bosses.BOSS,
+            "forms": [bosses.FORM_DEFS[f] for f in bosses.FORMS],
+        }
 
     @app.get("/api/balance")
     async def balance() -> dict:
-        # One source of truth: constants from balance.py, bodies from bosses.
-        return {**balance_summary(), "forms": list(bosses.FORMS)}
+        # One source of truth: constants from balance.py, bodies + transform
+        # rules from bosses. No new endpoint for the rules — this payload.
+        return {
+            **balance_summary(),
+            "forms": list(bosses.FORMS),
+            "transform": dict(bosses.TRANSFORM_RULES),
+        }
 
     @app.post("/api/brain", response_model=BrainResponse)
     async def brain(req: BrainRequest) -> BrainResponse:
