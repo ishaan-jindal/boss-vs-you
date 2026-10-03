@@ -61,6 +61,44 @@ import { createArena } from './arena.js';
 
 /* single immortal boss: forms arrive from /api/bosses, never hardcoded */
 const PX = 1 / 30; // legacy px -> world units (arena ~22 x 16 units)
+
+/* ---------- feel constants (NOT balance — do not tune difficulty here) ----------
+ * One block for control feel only. Nothing here changes damage, cooldowns,
+ * ranges, potion heals, XP, i-frames, or dash distance — those live in
+ * /api/balance and defaultStats(). These shape HOW input maps to motion.
+ * Values and why:
+ * - STICK_DEADZONE 0.15: below this the stick is rest tremor, not intent.
+ * - STICK_EXPO 1.35: response = t^1.35 past the deadzone. Exponent >1 keeps
+ *   gain low near center (small corrections precise) while full tilt still
+ *   reaches full speed. Slight: 1.0 is linear/twitchy, 2.0+ feels dead.
+ * - ACCEL_RATE 9/s: velocity chases input with 1-exp(-rate*dt), so starting
+ *   takes ~330ms to 95% — no longer instant, never sluggish.
+ *   FRICTION_RATE 14/s (~210ms to stop): higher than accel so releases feel
+ *   crisp while starts stay weighty.
+ * - TURN_RATE 12 rad/s: a 180° pivot reads as a turn (~260ms), not a snap,
+ *   but never lags behind the stick.
+ * - DASH_TIME 0.18 / DASH_PEAK 7.6: mirrors of the OLD flat 3.2x dash —
+ *   the ease-out integral 1+(PEAK-1)/3 equals 3.2 exactly, so total dash
+ *   distance is UNCHANGED (not a retune). I-frames stay 0.25s (balance).
+ * - DASH_MAX_FRAC 0.45: safety cap — one dash travels at most 45% of the
+ *   arena's short side (~7 units on 22x16; the real dash covers ~4.2, so
+ *   this never binds, it just guarantees no build can cross the arena).
+ * # ponytail: keyboard + touch stick only; add gamepad polling here if that ever matters. */
+const FEEL_STICK_DEADZONE = 0.15;
+const FEEL_STICK_EXPO = 1.35;
+const FEEL_ACCEL_RATE = 9.0;
+const FEEL_FRICTION_RATE = 14.0;
+const FEEL_TURN_RATE = 12.0;
+const FEEL_DASH_TIME = 0.18;
+const FEEL_DASH_PEAK = 7.6;
+const FEEL_DASH_MAX_FRAC = 0.45;
+/* Analog stick response: deadzone then expo, magnitude-preserving (out ≤ 1).
+ * Returns a scalar: caller reapplies the stick's direction. */
+function stickResponse(m) {
+  if (!(m > FEEL_STICK_DEADZONE)) return 0;
+  const t = (m - FEEL_STICK_DEADZONE) / (1 - FEEL_STICK_DEADZONE);
+  return Math.pow(clamp(t, 0, 1), FEEL_STICK_EXPO);
+}
 /* Boss tactics: sampled per decision from the brain's weights
  * (weighted random over keys — Math.random against cumulative mass).
  * Until the first reply lands, the uniform floor keeps the boss live. */
@@ -522,7 +560,7 @@ function startFight() {
     px: 0, pz: H - 2.5,
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
     dashLeft: 1, dashRefillT: 0,
-    dashDx: 0, dashDz: 0, dashing: 0, facing: Math.PI,
+    dashDx: 0, dashDz: 0, dashing: 0, dashDist: 0, vx: 0, vz: 0, facing: Math.PI,
     bx: 0, bz: -H + 2.5, flyY: 0,
     enraged: false, flying: false,
     atkTmap: {}, tactic: 'pressure', speedMul: 1, dmgMul: 1, intensity: 0.5,
@@ -669,8 +707,9 @@ function tryDash() {
   if (now - F.dashT < 0.25) return; // double-tap guard, not the cooldown (charges own that)
   F.dashLeft--;
   F.dashT = now;
-  F.ifrT = now + 0.25;
-  F.dashing = 0.18;
+  F.ifrT = now + 0.25; // i-frames UNCHANGED (balance, not feel)
+  F.dashing = FEEL_DASH_TIME; // duration UNCHANGED — mirrors the old 0.18 literal
+  F.dashDist = 0;
   let dx = F.joy.dx, dz = F.joy.dz;
   if (Math.hypot(dx, dz) < 0.2) { // dash away from boss by default
     dx = F.px - F.bx; dz = F.pz - F.bz;
@@ -992,22 +1031,62 @@ function update(dt) {
   const W = arena.ARENA_X, H = arena.ARENA_Z;
 
   // player movement (dash burst overrides stick/keys)
+  // INPUT RULE: stick and keyboard never sum raw. The stick is shaped first
+  // (deadzone + expo via stickResponse, magnitude preserved at <= 1); the
+  // keyboard is digital (diagonals normalised to 1); per axis the keyboard
+  // wins when held and the stick fills in otherwise — so the two can
+  // neither cancel (opposite inputs) nor double-count (same direction).
+  // Final magnitude is clamped to 1: combined input never exceeds base speed.
   const sp = F.stats.speed;
   if (F.dashing > 0) {
+    // ease-out burst: fast start, quick decay. p runs 0 (kick) -> 1 (tail);
+    // the integral equals the old flat 3.2x (1 + (7.6-1)/3), so dash
+    // distance is unchanged — only its delivery. Bounds clamp below covers
+    // the burst (same clamp as normal movement).
+    const p = clamp(1 - F.dashing / FEEL_DASH_TIME, 0, 1);
+    const mult = 1 + (FEEL_DASH_PEAK - 1) * (1 - p) * (1 - p);
+    const step = sp * mult * dt;
+    F.px += F.dashDx * step;
+    F.pz += F.dashDz * step;
+    F.dashDist = (F.dashDist || 0) + step;
     F.dashing -= dt;
-    F.px += F.dashDx * sp * 3.2 * dt;
-    F.pz += F.dashDz * sp * 3.2 * dt;
+    if (F.dashDist >= Math.min(W, H) * 2 * FEEL_DASH_MAX_FRAC) F.dashing = 0; // safety cap: never cross the arena
+    if (F.dashing <= 0) { F.vx = F.dashDx * sp; F.vz = F.dashDz * sp; } // land at cruise speed, no pop
+    else { F.vx = F.dashDx * sp * mult; F.vz = F.dashDz * sp * mult; } // velocity tracks the burst so release is smooth
   } else {
-    let mx = F.joy.dx, mz = F.joy.dz;
-    mx += (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
-    mz += (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) - (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
-    const m = Math.hypot(mx, mz);
-    if (m > 0.01) {
-      const c = Math.min(1, m) / (m || 1);
-      F.px += mx * c * sp * dt;
-      F.pz += mz * c * sp * dt;
-      F.moved10 += Math.hypot(mx * c, mz * c) * sp * dt;
-      F.facing = Math.atan2(mx * c, mz * c);
+    const sm = Math.hypot(F.joy.dx, F.joy.dz);
+    let sx = 0, sz = 0;
+    const resp = stickResponse(sm); // 0 below deadzone, <= 1 above — magnitude preserved
+    if (resp > 0 && sm > 0) { sx = (F.joy.dx / sm) * resp; sz = (F.joy.dz / sm) * resp; }
+    let kx = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+    let kz = (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) - (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
+    const km = Math.hypot(kx, kz);
+    if (km > 1) { kx /= km; kz /= km; } // digital diagonals run at full speed, not sqrt(2)
+    const mx = kx !== 0 ? kx : sx;
+    const mz = kz !== 0 ? kz : sz;
+    let m = Math.hypot(mx, mz);
+    let nx = mx, nz = mz;
+    if (m > 1) { nx = mx / m; nz = mz / m; m = 1; } // hybrid key+stick corner: clamp, never boost
+    const tvx = nx * sp, tvz = nz * sp; // target velocity: analog magnitude, never above base speed
+    const cur = Math.hypot(F.vx || 0, F.vz || 0);
+    const tgt = Math.hypot(tvx, tvz);
+    // accel when speeding up, higher friction when slowing: starts weighty, stops crisp.
+    // frame-rate independent exponential chase (1-exp(-rate*dt)), not a fixed lerp.
+    const rate = tgt > cur ? FEEL_ACCEL_RATE : FEEL_FRICTION_RATE;
+    const k = 1 - Math.exp(-rate * dt);
+    F.vx = (F.vx || 0) + (tvx - (F.vx || 0)) * k;
+    F.vz = (F.vz || 0) + (tvz - (F.vz || 0)) * k;
+    if (tgt < 0.05 * sp && Math.hypot(F.vx, F.vz) < 0.02 * sp) { F.vx = 0; F.vz = 0; } // settle: no endless glide
+    F.px += F.vx * dt;
+    F.pz += F.vz * dt;
+    F.moved10 += Math.hypot(F.vx, F.vz) * dt;
+    if (m > 0.05) {
+      // turn feel: chase the input heading at TURN_RATE — pivots read as
+      // turns, not teleports. Attack auto-face (tryAttack) stays instant.
+      const want = Math.atan2(nx, nz);
+      const diff = ((want - F.facing + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      const maxTurn = FEEL_TURN_RATE * dt;
+      F.facing += clamp(diff, -maxTurn, maxTurn);
     } else {
       F.stillSecs = (F.stillSecs || 0) + dt; // habit hook: time spent not moving feeds stationary_ratio
     }
@@ -1400,12 +1479,31 @@ function bindInput() {
     else if (e.code === 'KeyU' || e.code === 'KeyQ') tryPotion();
   });
   window.addEventListener('keyup', (e) => keys.delete(e.code));
-  window.addEventListener('blur', () => keys.clear());
 
   // joystick (left thumb, ground-plane: screen-right = +X, screen-up = -Z)
+  // bound ONLY to #joy-zone (bottom-left); touches starting on the action
+  // buttons (#fight-btns, separate element, right side) never reach here,
+  // so the stick and the buttons cannot fight over a touch. Targets stay
+  // >=64px (buttons 68-76px, stick zone 44vw x 46vh).
   const zone = $('joy-zone');
   const knob = $('joy-knob');
   const base = $('joy-base');
+  const resetJoyVisual = () => {
+    base.classList.remove('on');
+    knob.classList.remove('on');
+    setKnob(0, 0);
+  };
+  const releaseJoy = () => {
+    if (!F) return;
+    F.joy.active = false;
+    F.joy.id = null;
+    F.joy.dx = 0; F.joy.dz = 0;
+    resetJoyVisual();
+  };
+  // blur clears keys AND the stick: a stuck stick after alt-tab is the
+  // worst bug in this category, so both reset here (keys.clear was already
+  // present; the stick reset is new).
+  window.addEventListener('blur', () => { keys.clear(); releaseJoy(); });
   const setKnob = (dx, dy) => { knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)'; };
   zone.addEventListener('pointerdown', (e) => {
     if (!F || state !== 'fight' || F.paused || F.joy.active) return; // paused: stick stays dead
@@ -1435,6 +1533,7 @@ function bindInput() {
   const end = (e) => {
     if (!F || !F.joy.active || (e.pointerId !== undefined && e.pointerId !== F.joy.id)) return;
     F.joy.active = false;
+    F.joy.id = null;
     F.joy.dx = 0; F.joy.dz = 0;
     base.classList.remove('on');
     knob.classList.remove('on');
@@ -1442,6 +1541,10 @@ function bindInput() {
   };
   zone.addEventListener('pointerup', end);
   zone.addEventListener('pointercancel', end);
+  // pointer capture is held on the zone, so a release outside it still
+  // fires pointerup — but a lost capture without up/cancel (edge cases on
+  // some mobile browsers) must also release, or the stick sticks.
+  zone.addEventListener('lostpointercapture', end);
 
   const press = (id, fn) => {
     const b = $(id);
