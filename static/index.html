@@ -5,15 +5,93 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#14100c">
-<title>Boss vs You — a tiny boss-battler</title>
+<meta name="theme-color" content="#ffe9c4">
+<title>Boss vs You — 3D arena battler</title>
 <link rel="stylesheet" href="/static/style.css">
-<script src="/static/lib/phaser.min.js"></script>
+<script type="importmap">
+{ "imports": { "three": "/static/lib/three.module.js" } }
+</script>
 </head>
 <body>
-<div id="game-root" class="bv-root"></div>
+<canvas id="arena-canvas" aria-label="3D battle arena"></canvas>
 
-<!-- DOM juice layers (game.js toggles these; all optional, guarded) -->
+<!-- MENU -->
+<section id="screen-menu" class="screen active" aria-label="Main menu">
+  <div class="panel menu-panel">
+    <p class="kicker">A TINY 3D BOSS-BATTLER</p>
+    <h1 class="title tilt">BOSS <span>vs</span> YOU</h1>
+    <p class="tagline">Dodge the red. Bonk the boss. Three rounds, one hero.</p>
+    <div class="controls-card">
+      <h2>HOW TO FIGHT</h2>
+      <ul id="controls-list"></ul>
+    </div>
+    <button id="btn-fight" class="big-btn">▶ FIGHT THE FIRST BOSS</button>
+    <p id="menu-status" class="status"></p>
+    <p class="footnote">Best on iPad landscape · sound off, drama on</p>
+  </div>
+</section>
+
+<!-- SELECT -->
+<section id="screen-select" class="screen" aria-label="Pick your fight">
+  <div class="panel select-panel">
+    <h1 class="title small tilt">PICK YOUR FIGHT</h1>
+    <p class="tagline">Beat one to unlock the next. Losing teaches you the moves.</p>
+    <div id="boss-cards"></div>
+    <button id="btn-back-menu" class="ghost-btn">← MENU</button>
+  </div>
+</section>
+
+<!-- FIGHT HUD -->
+<div id="hud" aria-label="Fight HUD">
+  <div id="hud-top">
+    <div class="hp-panel you">
+      <span class="hp-label">YOU ♥ HERO</span>
+      <div class="hpbar"><div id="hp-player-fill" class="hpfill you"></div></div>
+      <span id="hp-player-num" class="hpnum">100 / 100</span>
+      <span id="potion-count" class="potions">POT ×2</span>
+    </div>
+    <div class="hp-mid">
+      <span id="clock">0:00</span>
+      <span id="cooldowns"></span>
+    </div>
+    <div class="hp-panel boss">
+      <span id="boss-name" class="hp-label">◆ BOSS</span>
+      <div class="hpbar bossbar">
+        <div id="hp-boss-fill" class="hpfill boss"></div>
+        <span class="enrage-mark" title="Enrage below 30%">▼ ENRAGE &lt;30%</span>
+      </div>
+      <span id="hp-boss-num" class="hpnum">120 / 120</span>
+    </div>
+  </div>
+  <div id="hint-bar">WASD / stick to move · <b>J</b> attacks · <b>K</b> dashes through red!</div>
+  <div id="taunt-balloon" aria-hidden="true"></div>
+</div>
+<div id="joy-zone" aria-label="Move joystick"><div id="joy-base"></div><div id="joy-knob"></div></div>
+<div id="fight-btns">
+  <button id="btn-attack" class="fight-btn atk">ATK<span>slash · J</span></button>
+  <button id="btn-special" class="fight-btn spec">SPEC<span>burst · L</span></button>
+  <button id="btn-dash" class="fight-btn dash">DASH<span>dodge · K</span></button>
+  <button id="btn-potion" class="fight-btn pot">POT<span>heal · U</span></button>
+</div>
+
+<!-- END -->
+<section id="screen-end" class="screen" aria-label="Fight result">
+  <div class="panel end-panel">
+    <p id="end-kicker" class="kicker"></p>
+    <h1 id="end-title" class="title small tilt"></h1>
+    <p id="end-flavour" class="tagline"></p>
+    <div id="end-stats"></div>
+    <p id="end-ladder" class="status"></p>
+    <div class="end-btns">
+      <button id="btn-rematch" class="big-btn">↻ REMATCH</button>
+      <button id="btn-next" class="big-btn alt">→ NEXT BOSS</button>
+      <button id="btn-bosses" class="ghost-btn">← BOSSES</button>
+    </div>
+  </div>
+</section>
+
+<!-- juice layers -->
+<div id="pop-layer" aria-hidden="true"></div>
 <div id="bv-vignette" aria-hidden="true"></div>
 <div id="bv-flash" aria-hidden="true"></div>
 <div id="bv-banner" role="status" aria-live="assertive" aria-hidden="true">
@@ -21,10 +99,9 @@
   <span id="bv-banner-title"></span>
   <span id="bv-banner-sub"></span>
 </div>
-
 <div id="rotate-hint">Tip: landscape gives you more dodging room.</div>
-<div id="taunt-region" class="bv-taunt" role="status" aria-live="polite"></div>
-<noscript><p class="bv-noscript">Boss vs You needs JavaScript to fight. Turn it on and come back swinging.</p></noscript>
-<script src="/static/game.js"></script>
+<div id="taunt-region" role="status" aria-live="polite"></div>
+<noscript><p class="noscript">Boss vs You needs JavaScript to fight. Turn it on and come back swinging.</p></noscript>
+<script type="module" src="/static/game.js"></script>
 </body>
 </html>

@@ -37,6 +37,16 @@ BOSSES: list[dict] = [
         "move_speed": 170,
         "colour": 0x8A6BC9,
         "glyph": "☁",
+        "visual": {
+            "recipe": "courier",
+            "scale": 1.0,
+            "palette": {
+                "body": 0x2B2440,
+                "trim": 0x8A6BC9,
+                "hat": 0x1A1626,
+                "eye": 0xCBB7FF,
+            },
+        },
         "attacks": [
             {
                 "id": "shadow-lunge",
@@ -108,6 +118,16 @@ BOSSES: list[dict] = [
         "move_speed": 90,
         "colour": 0xE0572B,
         "glyph": "▲",
+        "visual": {
+            "recipe": "cinderjaw",
+            "scale": 1.35,
+            "palette": {
+                "body": 0xE0572B,
+                "jaw": 0x7A2A12,
+                "wing": 0x5C1A08,
+                "eye": 0xFFD75E,
+            },
+        },
         "attacks": [
             {
                 "id": "fire-breath",
@@ -180,6 +200,16 @@ BOSSES: list[dict] = [
         "move_speed": 120,
         "colour": 0x3FA34D,
         "glyph": "✦",
+        "visual": {
+            "recipe": "knight",
+            "scale": 1.15,
+            "palette": {
+                "body": 0x3FA34D,
+                "dark": 0x1D5C28,
+                "sword": 0xF5E6C8,
+                "shield": 0x2E7A3A,
+            },
+        },
         "attacks": [
             {
                 "id": "thorn-combo",
