@@ -20,16 +20,35 @@
  * Combat contract (matches bosses.py numbers exactly):
  * player HP 100, melee dmg 8 @ 0.6s, special 25 @ 12s, dash i-frames 0.25s @ 4s,
  * potion heal 30 x2. Brain ticks every ~8s, tactic switch >= 6s.
+ *
+ * Fight state (F) — single mutable per-run object:
+ *   F.stats: live player numbers (maxHp, hp, damage, specialDmg, attackCd,
+ *     specialCd, dashCd, dashCharges, speed, atkRange, specialRange,
+ *     potionHeal, potionsLeft, level, xp, descent). Draft/level-up code
+ *     mutates these live; nothing caches them elsewhere.
+ *   F.boss: { hp, maxHp } — the current form's live pool. A mid-fight
+ *     transform resets both. F.maxHp aliases F.boss.maxHp. Never use
+ *     F.cfg.hp for live math (it is the design-time value).
+ *   F.paused: true while any menu/draft/overlay is open. Simulation
+ *     (update + all deferred damage) freezes; rendering continues.
+ *   F.lastAppliedSeq: seq guard — brain replies with seq <= this are stale.
  */
 import { createArena } from './arena.js';
 
 const LADDER = ['smoke-courier', 'cinderjaw', 'briar-knight'];
 const PX = 1 / 30; // legacy px -> world units (arena ~22 x 16 units)
-const PLAYER = {
-  hp: 100, speed: 220 * PX, atkDmg: 8, atkCd: 0.6, atkRange: 100 * PX,
-  dashCd: 4, specialDmg: 25, specialCd: 12, specialRange: 150 * PX,
-  potionHeal: 30, potions: 2,
-};
+/* Base player numbers (fresh run, level 1). Copied into F.stats per fight —
+ * F.stats is the live table from then on. */
+function defaultStats() {
+  return {
+    maxHp: 100, hp: 100,
+    damage: 8, specialDmg: 25,
+    attackCd: 0.6, specialCd: 12, dashCd: 4, dashCharges: 1,
+    speed: 220 * PX, atkRange: 100 * PX, specialRange: 150 * PX,
+    potionHeal: 30, potionsLeft: 2,
+    level: 1, xp: 0, descent: 1,
+  };
+}
 const SCORE_BASE = { 'smoke-courier': 1000, cinderjaw: 1500, 'briar-knight': 2000 };
 const STARS = { 'smoke-courier': 1, cinderjaw: 2, 'briar-knight': 3 };
 const PACE = {
@@ -116,6 +135,21 @@ let canvas = null;
 function hitstop(sec) {
   if (!F || REDUCED) return;
   F.stopT = Math.max(F.stopT || 0, sec);
+}
+
+/* Pause: single flag, no stack (one overlay owns it at a time).
+ * # ponytail: single active pause source rather than a pause stack;
+ * add a stack only if two overlays ever pause at once. */
+function setPaused(v) {
+  if (!F || F.paused === v) return;
+  const now = performance.now() / 1000;
+  if (v) { F.paused = true; F.pauseT0 = now; return; }
+  /* resume: shift wall-clock timers forward so cooldowns and the clock freeze across the menu */
+  const dt = now - (F.pauseT0 || now);
+  F.paused = false;
+  F.atkT += dt; F.specT += dt; F.dashT += dt; F.ifrT += dt; F.lastSwitch += dt;
+  F.startT += dt * 1000;
+  for (const k in F.atkTmap) F.atkTmap[k] += dt;
 }
 
 function showScreen(name) {
@@ -226,10 +260,14 @@ function startFight(bossId) {
   const W = arena.ARENA_X, H = arena.ARENA_Z;
   F = {
     cfg, mySeq,
-    px: 0, pz: H - 2.5, php: PLAYER.hp, potions: PLAYER.potions,
+    paused: false, pauseT0: 0,
+    lastAppliedSeq: -1,
+    stats: defaultStats(),
+    boss: { hp: cfg.hp, maxHp: cfg.hp },
+    px: 0, pz: H - 2.5,
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
     dashDx: 0, dashDz: 0, dashing: 0, facing: Math.PI,
-    bx: 0, bz: -H + 2.5, flyY: 0, bhp: cfg.hp,
+    bx: 0, bz: -H + 2.5, flyY: 0,
     enraged: false, flying: false, stanceT: 0,
     atkTmap: {}, tactic: cfg.tactics[0].id, speedMul: 1, dmgMul: 1, intensity: 0.5,
     over: false, won: false, startT: performance.now(), tick: 0,
@@ -238,6 +276,13 @@ function startFight(bossId) {
     moved10: 0, movedDecay: 0, actT: 0, timeouts: [],
     joy: { active: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0, dz: 0 },
   };
+  /* F.maxHp aliases F.boss.maxHp so a form transform has one live pool to reset. */
+  const selfF = F;
+  Object.defineProperty(F, 'maxHp', {
+    get() { return selfF.boss.maxHp; },
+    set(v) { selfF.boss.maxHp = v; },
+    configurable: true,
+  });
   arena.setBoss((cfg.visual && cfg.visual.recipe) || bossIdToRecipe(bossId), cfg.visual || {});
   arena.clearTelegraphs();
   arena.clearCracks();
@@ -268,30 +313,38 @@ function bossIdToRecipe(id) {
 function later(ms, fn) {
   if (!F) return;
   const mySeq = F.mySeq;
-  const t = setTimeout(() => { if (F && F.mySeq === mySeq && !F.over) fn(); }, ms);
-  F.timeouts.push(t);
+  /* Respects F.paused: while a menu/draft is open the callback re-queues
+   * instead of firing, so telegraphs and stance timers freeze with the world. */
+  const fire = () => {
+    if (!F || F.mySeq !== mySeq || F.over) return;
+    if (F.paused) { F.timeouts.push(setTimeout(fire, 100)); return; }
+    fn();
+  };
+  F.timeouts.push(setTimeout(fire, ms));
 }
 
 function refreshPotions() {
   if (!F) return;
-  $('potion-count').textContent = 'POT ×' + F.potions + (F.potions ? ' (+30)' : ' (empty)');
+  const S = F.stats;
+  $('potion-count').textContent = 'POT ×' + S.potionsLeft + (S.potionsLeft ? ' (+' + S.potionHeal + ')' : ' (empty)');
 }
 
 /* ---------- player actions ---------- */
 function tryAttack(special) {
-  if (!F || F.over || state !== 'fight') return;
+  if (!F || F.over || F.paused || state !== 'fight') return; // paused: no input damage
   const now = performance.now() / 1000;
+  const S = F.stats;
   if (special) {
-    if (now - F.specT < PLAYER.specialCd) return;
+    if (now - F.specT < S.specialCd) return;
     F.specT = now;
   } else {
-    if (now - F.atkT < PLAYER.atkCd) return;
+    if (now - F.atkT < S.attackCd) return;
     F.atkT = now;
   }
   logHist('atk');
   $('hint-bar').classList.remove('show');
-  const range = special ? PLAYER.specialRange : PLAYER.atkRange;
-  const dmg = special ? PLAYER.specialDmg : PLAYER.atkDmg;
+  const range = special ? S.specialRange : S.atkRange;
+  const dmg = special ? S.specialDmg : S.damage;
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
   if (F.stanceT > 0) { // riposte stance reflects damage (punish mashing)
     hurtPlayer(Math.round(10 * F.dmgMul), 'countered!');
@@ -301,7 +354,7 @@ function tryAttack(special) {
   }
   const reach = range + 1.1;
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
-    F.bhp -= dmg;
+    F.boss.hp -= dmg;
     F.events.push(special ? 'boss hit by special' : 'boss hit');
     hitstop(special ? 0.09 : 0.05);
     arena.burst(F.bx, F.bz, special ? 0xffd75e : 0xffffff, special ? 14 : 9, 4.5, 1.0 + F.flyY);
@@ -316,9 +369,9 @@ function tryAttack(special) {
 }
 
 function tryDash() {
-  if (!F || F.over || state !== 'fight') return;
+  if (!F || F.over || F.paused || state !== 'fight') return; // paused: no movement
   const now = performance.now() / 1000;
-  if (now - F.dashT < PLAYER.dashCd) return;
+  if (now - F.dashT < F.stats.dashCd) return;
   F.dashT = now;
   F.ifrT = now + 0.25;
   F.dashing = 0.18;
@@ -336,24 +389,25 @@ function tryDash() {
 }
 
 function tryPotion() {
-  if (!F || F.over || state !== 'fight') return;
-  if (F.potions <= 0 || F.php >= PLAYER.hp) return;
-  F.potions--;
-  F.php = Math.min(PLAYER.hp, F.php + PLAYER.potionHeal);
+  if (!F || F.over || F.paused || state !== 'fight') return; // paused: no healing
+  const S = F.stats;
+  if (S.potionsLeft <= 0 || S.hp >= S.maxHp) return;
+  S.potionsLeft--;
+  S.hp = Math.min(S.maxHp, S.hp + S.potionHeal);
   refreshPotions();
   F.events.push('player healed');
   arena.burst(F.px, F.pz, 0x7cff6b, 10, 3.5);
-  spawnPop(F.px, 1.8, F.pz, '+30 PATCHED!', 'heal');
+  spawnPop(F.px, 1.8, F.pz, '+' + S.potionHeal + ' PATCHED!', 'heal');
 }
 
 function hurtPlayer(dmg, why) {
-  if (!F || F.over) return;
+  if (!F || F.over || F.paused) return; // paused: no HP mutation
   const now = performance.now() / 1000;
   if (now < F.ifrT) { // i-frames save you
     if (dmg > 0) spawnPop(F.px, 1.8, F.pz, 'TOO SLOW!', 'heal');
     return;
   }
-  F.php -= dmg;
+  F.stats.hp -= dmg;
   F.events.push('player hit' + (why ? ' (' + why + ')' : ''));
   if (dmg > 0) {
     hitstop(0.07);
@@ -382,30 +436,40 @@ function playerStyle() {
 
 /* ---------- brain ---------- */
 function think(first) {
-  if (!F || F.over) return;
+  if (!F || F.over || F.paused) return; // paused: no new brain ticks while a menu is open
   const self = F;
-  const bossPct = Math.max(0, (self.bhp / self.cfg.hp) * 100);
+  const bossPct = Math.max(0, (self.boss.hp / self.boss.maxHp) * 100);
   const phase = bossPct < 30 ? 'enrage' : 'normal';
   if (phase === 'enrage' && !self.enraged) enterEnrage();
+  const seq = self.tick++;
   const body = {
-    boss_id: self.cfg.id, tick: self.tick++,
-    boss_hp_pct: Math.round(bossPct), player_hp_pct: Math.round(Math.max(0, self.php)),
+    boss_id: self.cfg.id, tick: seq, seq,
+    boss_hp_pct: Math.round(bossPct), player_hp_pct: Math.round(Math.max(0, self.stats.hp)),
     player_style: playerStyle(), current_tactic: self.tactic,
     phase, threats: self.events.slice(-6),
   };
   self.events = [];
   api('/api/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-    .then((out) => {
-      if (!F || F.mySeq !== self.mySeq || F.over) return;
-      const now = performance.now() / 1000;
-      if (out.tactic_id && out.tactic_id !== F.tactic && (first || now - F.lastSwitch >= 6)) {
-        F.tactic = out.tactic_id;
-        F.lastSwitch = now;
-      }
-      if (out.taunt) say(out.taunt);
-      if (typeof out.intensity === 'number') F.intensity = out.intensity;
-    })
+    .then((out) => applyBrain(out, { mySeq: self.mySeq, seq, first: !!first }))
     .catch(() => { /* fight survives a dead model - local AI keeps going */ });
+}
+
+/* Single choke point for brain replies. Drops any reply with
+ * seq <= F.lastAppliedSeq so a slow 6–23s response can never overwrite
+ * fresher state. Replies without a seq (current server) always apply.
+ * Safe while paused: tactic/intensity/taunt never mutate HP or positions. */
+function applyBrain(out, ctx) {
+  if (!out || !F || F.mySeq !== ctx.mySeq || F.over) return;
+  const seq = typeof out.seq === 'number' ? out.seq : ctx.seq;
+  if (seq <= F.lastAppliedSeq) return; // stale reply — ignore
+  F.lastAppliedSeq = seq;
+  const now = performance.now() / 1000;
+  if (out.tactic_id && out.tactic_id !== F.tactic && (ctx.first || now - F.lastSwitch >= 6)) {
+    F.tactic = out.tactic_id;
+    F.lastSwitch = now;
+  }
+  if (out.taunt) say(out.taunt);
+  if (typeof out.intensity === 'number') F.intensity = out.intensity;
 }
 
 function enterEnrage() {
@@ -438,7 +502,7 @@ function tacticPrefs() {
   return { want: ['melee', 'lunge', 'aoe_circle'], near: true };
 }
 function bossAct() {
-  if (!F || F.over) return;
+  if (!F || F.over || F.paused) return; // paused: no new attacks scheduled
   const prefs = tacticPrefs();
   const d = dist2(F.px, F.pz, F.bx, F.bz);
   const cands = F.cfg.attacks.filter((a) =>
@@ -454,6 +518,7 @@ function bossAct() {
     arena.setRiposte(true);
     say('Come on, hero. Swing into the thorns.');
     F.events.push('boss countered');
+    /* later() defers while paused — stance expiry freezes with the world */
     later(1500, () => { F.stanceT = 0; arena.setRiposte(false); });
     return;
   }
@@ -482,6 +547,7 @@ function telegraph(a, fake) {
     arena.spawnDecoys([[F.bx - 2, F.bz + 1], [F.bx + 2, F.bz + 1]]);
   }
   later(windup * 1000, () => {
+    /* Pause-aware via later(): this windup cannot resolve while a menu is open. */
     arena.popTelegraph(h);
     if (fake) {
       F.events.push('boss feinted');
@@ -494,6 +560,7 @@ function telegraph(a, fake) {
 }
 
 function resolveAttack(a, t) {
+  if (!F || F.over || F.paused) return; // paused: no attack resolution
   const dmg = Math.round(a.damage * F.dmgMul);
   if (a.pattern === 'projectile') {
     const id = 'p' + (F.projSeq++);
@@ -544,11 +611,12 @@ function resolveAttack(a, t) {
 
 /* ---------- per-frame ---------- */
 function update(dt) {
+  if (!F || F.over || F.paused) return; // paused: simulation frozen, rendering continues
   const now = performance.now() / 1000;
   const W = arena.ARENA_X, H = arena.ARENA_Z;
 
   // player movement (dash burst overrides stick/keys)
-  const sp = PLAYER.speed;
+  const sp = F.stats.speed;
   if (F.dashing > 0) {
     F.dashing -= dt;
     F.px += F.dashDx * sp * 3.2 * dt;
@@ -573,7 +641,7 @@ function update(dt) {
   arena.heroPos(F.px, F.pz, F.facing, now < F.ifrT, F.dashing > 0);
 
   // flight phase: cinderjaw takes to the sky at 50%
-  if (F.cfg.id === 'cinderjaw' && !F.flying && F.bhp < F.cfg.hp * 0.5) {
+  if (F.cfg.id === 'cinderjaw' && !F.flying && F.boss.hp < F.boss.maxHp * 0.5) {
     F.flying = true;
     arena.setFlight(true);
     showBanner('CINDERJAW TAKES FLIGHT', 'WINGS UP - THE SKY IS HERS', 'she rains skyfire: keep moving, hero', '#ff7a3c');
@@ -602,7 +670,7 @@ function update(dt) {
   F.actT += dt;
   if (F.actT > 1.2) { F.actT = 0; bossAct(); }
 
-  // projectiles + walls
+  // projectiles + walls (unreachable while paused — update returns above, so impacts freeze)
   for (let i = F.projectiles.length - 1; i >= 0; i--) {
     const pr = F.projectiles[i];
     pr.x += pr.vx * dt; pr.z += pr.vz * dt; pr.life -= dt;
@@ -625,7 +693,7 @@ function update(dt) {
 
   updateHUD();
 
-  // brain every ~8s
+  // brain every ~8s (skipped while paused — update returns above; think() also guards)
   F.brainTimer += dt;
   if (F.brainTimer >= 8) { F.brainTimer = 0; think(); }
 
@@ -639,25 +707,26 @@ function update(dt) {
   }
 
   // endings: opponents FAINT, never die
-  if (F.bhp <= 0) finish(true);
-  else if (F.php <= 0) finish(false);
+  if (F.boss.hp <= 0) finish(true);
+  else if (F.stats.hp <= 0) finish(false);
 }
 
 function updateHUD() {
-  setBar('hp-player', F.php, PLAYER.hp);
-  setBar('hp-boss', F.bhp, F.cfg.hp);
-  $('potion-count').textContent = 'POT ×' + F.potions;
+  const S = F.stats;
+  setBar('hp-player', S.hp, S.maxHp);
+  setBar('hp-boss', F.boss.hp, F.boss.maxHp);
+  $('potion-count').textContent = 'POT ×' + S.potionsLeft;
   const s = Math.floor((performance.now() - F.startT) / 1000);
   $('clock').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
   const now = performance.now() / 1000;
   const cd = (t, c) => Math.max(0, c - (now - t));
   $('cooldowns').textContent =
-    'ATK ' + fmtCd(cd(F.atkT, PLAYER.atkCd)) + '  SPEC ' + fmtCd(cd(F.specT, PLAYER.specialCd)) +
-    '  DASH ' + fmtCd(cd(F.dashT, PLAYER.dashCd));
-  $('btn-attack').classList.toggle('cool', cd(F.atkT, PLAYER.atkCd) > 0);
-  $('btn-special').classList.toggle('cool', cd(F.specT, PLAYER.specialCd) > 0);
-  $('btn-dash').classList.toggle('cool', cd(F.dashT, PLAYER.dashCd) > 0);
-  $('btn-potion').classList.toggle('cool', F.potions <= 0);
+    'ATK ' + fmtCd(cd(F.atkT, S.attackCd)) + '  SPEC ' + fmtCd(cd(F.specT, S.specialCd)) +
+    '  DASH ' + fmtCd(cd(F.dashT, S.dashCd));
+  $('btn-attack').classList.toggle('cool', cd(F.atkT, S.attackCd) > 0);
+  $('btn-special').classList.toggle('cool', cd(F.specT, S.specialCd) > 0);
+  $('btn-dash').classList.toggle('cool', cd(F.dashT, S.dashCd) > 0);
+  $('btn-potion').classList.toggle('cool', S.potionsLeft <= 0);
 }
 function fmtCd(v) { return v > 0 ? v.toFixed(1) + 's' : 'READY'; }
 function setBar(id, v, max) {
@@ -674,7 +743,7 @@ function finish(won) {
   arena.setRiposte(false);
   arena.clearDecoys();
   const secs = (performance.now() - F.startT) / 1000;
-  const hpLeft = Math.max(0, Math.round(F.php));
+  const hpLeft = Math.max(0, Math.round(F.stats.hp));
   const score = won ? scoreFor(F.cfg.id, secs, hpLeft) : 0;
   const r = { bossId: F.cfg.id, cfg: F.cfg, won, secs, hpLeft, score };
   if (won) {
@@ -687,7 +756,13 @@ function finish(won) {
     showBanner('SO CLOSE, HERO', 'THAT BOSS GOT LUCKY', 'shake it off - you were learning its moves', '#ff5a4e');
   }
   const mySeq = F.mySeq;
-  setTimeout(() => { if (F && F.mySeq === mySeq) showEnd(r); }, won ? 1200 : 600);
+  /* Pause-aware: the end screen waits out any open overlay instead of stacking on it. */
+  const show = () => {
+    if (!F || F.mySeq !== mySeq) return;
+    if (F.paused) { setTimeout(show, 200); return; }
+    showEnd(r);
+  };
+  setTimeout(show, won ? 1200 : 600);
 }
 
 /* ---------- input: joystick + buttons + keyboard ---------- */
@@ -698,7 +773,7 @@ function bindInput() {
     if (state === 'fight' && GAME_KEYS.has(e.code)) e.preventDefault();
     if (e.repeat) return;
     keys.add(e.code);
-    if (state !== 'fight' || !F || F.over) return;
+    if (state !== 'fight' || !F || F.over || F.paused) return; // paused: inputs frozen
     if (e.code === 'KeyJ' || e.code === 'Space') tryAttack(false);
     else if (e.code === 'KeyK' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') tryDash();
     else if (e.code === 'KeyL' || e.code === 'KeyE') tryAttack(true);
@@ -785,7 +860,8 @@ function boot() {
     const dt = Math.min(rawDt, 0.05);
     last = t;
     let frozen = false;
-    if (state === 'fight' && F && !F.over) {
+    /* paused: skip simulation, keep rendering (arena.frame still runs below) */
+    if (state === 'fight' && F && !F.over && !F.paused) {
       if (F.stopT > 0) { // impact freeze: hold the frame, burn the timer
         F.stopT -= rawDt;
         frozen = true;
