@@ -7,9 +7,13 @@
  * Controls: #joy-zone (+ #joy-base, #joy-knob), #btn-attack, #btn-special,
  *   #btn-dash, #btn-potion
  * Juice: #arena-canvas, #pop-layer (.pop, .pop.static for reduced-motion),
- *   #taunt-balloon, #taunt-region (role=status), #bv-banner (+ kicker/title/sub),
+ *   #taunt-balloon, #taunt-region (role=status), #bv-banner (+ kicker/title/sub,
+ *   --splash accent per moment: boss colour, ember flight, red enrage, gold win),
  *   #bv-vignette, #bv-flash
- * 3D: static/arena.js exports createArena (fighters, telegraphs, particles)
+ * 3D: static/arena.js exports createArena (fighters, telegraphs, particles,
+ *   dust, crack decals). Impact feel: hitstop freezes update for a beat on
+ *   every landed hit (see hitstop()); shake is heavy on purpose; dust and
+ *   cracks sell the weight. All comic, never gore: debris and dust only.
  * localStorage: 'bvy-ladder' (array of beaten boss ids, in ladder order)
  * Ladder order: ['smoke-courier', 'cinderjaw', 'briar-knight']
  *
@@ -73,12 +77,15 @@ function api(path, opts) {
 }
 
 /* ---------- DOM juice (all guarded) ---------- */
-function showBanner(kicker, title, sub) {
+function showBanner(kicker, title, sub, accent) {
   const b = $('bv-banner');
   if (!b) return;
   $('bv-banner-kicker').textContent = kicker;
   $('bv-banner-title').textContent = title;
   $('bv-banner-sub').textContent = sub || '';
+  /* dark splash panel: tint the frame per moment (boss colour, ember, gold win) */
+  if (accent) b.style.setProperty('--splash', accent);
+  else b.style.removeProperty('--splash');
   b.setAttribute('aria-hidden', 'false');
   b.classList.remove('show');
   void b.offsetWidth;
@@ -102,6 +109,14 @@ let arena = null;
 let F = null; // fight state
 let fightSeq = 0;
 let canvas = null;
+
+/* Impact freeze: skip world updates for a beat so landed hits thud.
+ * Rendering continues (a held frame), telegraphs freeze too. Off under
+ * reduced-motion — a freeze is still a jolt. */
+function hitstop(sec) {
+  if (!F || REDUCED) return;
+  F.stopT = Math.max(F.stopT || 0, sec);
+}
 
 function showScreen(name) {
   state = name;
@@ -218,28 +233,31 @@ function startFight(bossId) {
     enraged: false, flying: false, stanceT: 0,
     atkTmap: {}, tactic: cfg.tactics[0].id, speedMul: 1, dmgMul: 1, intensity: 0.5,
     over: false, won: false, startT: performance.now(), tick: 0,
-    lastSwitch: -99, events: [], hist: [], brainTimer: 0,
+    lastSwitch: -99, events: [], hist: [], brainTimer: 0, stopT: 0,
     projectiles: [], walls: [], projSeq: 0, wallSeq: 0,
     moved10: 0, movedDecay: 0, actT: 0, timeouts: [],
     joy: { active: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0, dz: 0 },
   };
   arena.setBoss((cfg.visual && cfg.visual.recipe) || bossIdToRecipe(bossId), cfg.visual || {});
   arena.clearTelegraphs();
+  arena.clearCracks();
   for (const pr of F.projectiles) arena.killProjectile(pr.id);
   for (const wl of F.walls) arena.killWall(wl.id);
   F.projectiles = []; F.walls = [];
   setVignette(false);
   $('boss-name').textContent = '◆ ' + cfg.name.toUpperCase();
   $('boss-name').style.color = css(cfg.colour);
+  $('boss-name').style.textShadow = '0 0 14px ' + css(cfg.colour) + ', 2px 2px 0 #000';
   $('hint-bar').classList.toggle('show', loadLadder().length === 0);
   refreshPotions();
   showScreen('fight');
   resizeArena();
   /* boss intro splash */
   showBanner('ROUND ' + (LADDER.indexOf(bossId) + 1) + ' OF ' + LADDER.length,
-    cfg.name.toUpperCase() + ' SMASHES IN!', cfg.title);
+    cfg.name.toUpperCase() + ' SMASHES IN!', cfg.title, css(cfg.colour));
   say(cfg.taunt_voice[0] || ('I am ' + cfg.name + '!'));
-  arena.shake(0.5);
+  arena.shake(0.7);
+  arena.dust(0, 0, 10, 0xd8c49a, 3);
   think(true);
 }
 
@@ -277,20 +295,23 @@ function tryAttack(special) {
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
   if (F.stanceT > 0) { // riposte stance reflects damage (punish mashing)
     hurtPlayer(Math.round(10 * F.dmgMul), 'countered!');
-    spawnPop(F.px, 1.8, F.pz, 'OUCH!', 'bad');
-    arena.shake(0.45);
+    spawnPop(F.px, 1.8, F.pz, 'SMASHED!', 'bad');
+    arena.shake(0.6);
     return;
   }
   const reach = range + 1.1;
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
     F.bhp -= dmg;
     F.events.push(special ? 'boss hit by special' : 'boss hit');
+    hitstop(special ? 0.09 : 0.05);
     arena.burst(F.bx, F.bz, special ? 0xffd75e : 0xffffff, special ? 14 : 9, 4.5, 1.0 + F.flyY);
-    spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'BAM! -' : 'POW! -') + dmg, special ? 'special' : 'hit');
-    if (!REDUCED) arena.shake(special ? 0.4 : 0.22);
+    arena.dust(F.bx, F.bz, special ? 12 : 7);
+    if (special) arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.0);
+    spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'WHAM! -' : 'THWACK! -') + dmg, special ? 'special' : 'hit');
+    if (!REDUCED) arena.shake(special ? 0.6 : 0.35);
     else domFlash();
   } else {
-    spawnPop(F.px, 1.8, F.pz, 'MISS!', 'miss');
+    spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss');
   }
 }
 
@@ -310,6 +331,7 @@ function tryDash() {
   logHist('dash');
   F.events.push('player dashed');
   arena.burst(F.px, F.pz, 0x9cc8ff, 6, 2.5);
+  arena.dust(F.px, F.pz, 5);
   arena.puffSmoke();
 }
 
@@ -321,22 +343,24 @@ function tryPotion() {
   refreshPotions();
   F.events.push('player healed');
   arena.burst(F.px, F.pz, 0x7cff6b, 10, 3.5);
-  spawnPop(F.px, 1.8, F.pz, '+30!', 'heal');
+  spawnPop(F.px, 1.8, F.pz, '+30 PATCHED!', 'heal');
 }
 
 function hurtPlayer(dmg, why) {
   if (!F || F.over) return;
   const now = performance.now() / 1000;
   if (now < F.ifrT) { // i-frames save you
-    if (dmg > 0) spawnPop(F.px, 1.8, F.pz, 'DODGED!', 'heal');
+    if (dmg > 0) spawnPop(F.px, 1.8, F.pz, 'TOO SLOW!', 'heal');
     return;
   }
   F.php -= dmg;
   F.events.push('player hit' + (why ? ' (' + why + ')' : ''));
   if (dmg > 0) {
-    arena.burst(F.px, F.pz, 0xe8322a, 10, 4);
+    hitstop(0.07);
+    arena.burst(F.px, F.pz, 0xff5a4e, 10, 4);
+    arena.dust(F.px, F.pz, 8);
     spawnPop(F.px, 2.0, F.pz, '-' + dmg, 'bad');
-    arena.shake(0.5);
+    arena.shake(0.7);
     domFlash();
   }
 }
@@ -390,11 +414,13 @@ function enterEnrage() {
   F.speedMul = e.speed_mult || 1.25;
   F.dmgMul = e.damage_mult || 1.25;
   arena.setEnrage(true);
-  arena.shake(0.6);
+  arena.shake(0.9);
+  arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.4);
+  arena.dust(F.bx, F.bz, 14, 0xd8c49a, 4);
   setVignette(true);
   domFlash();
   const line = (e.taunts && e.taunts[0]) || 'Enough, hero - my real power!';
-  showBanner('!! ' + F.cfg.name.toUpperCase() + ' ENRAGED !!', 'BELOW 30% - NO MERCY', line);
+  showBanner('!! ' + F.cfg.name.toUpperCase() + ' ENRAGED !!', 'BELOW 30% - NO MERCY', line, '#ff3b30');
   say(line);
 }
 
@@ -480,11 +506,14 @@ function resolveAttack(a, t) {
     const id = 'w' + (F.wallSeq++);
     F.walls.push({ id, x: t.x, z: t.z, w: t.w, d: t.d, dmg, life: 4 });
     arena.spawnWall(id, t.x, t.z, t.w, t.d);
+    arena.dust(t.x, t.z, 8, 0xd8c49a, 5); // erupting thorns kick dirt
+    arena.shake(0.4);
   } else if (a.pattern === 'lunge') {
     F.bx = clamp(F.bx + (F.px - F.bx) * 0.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
     F.bz = clamp(F.bz + (F.pz - F.bz) * 0.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+    arena.dust(F.bx, F.bz, 6); // landing thud kicks grit even on a miss
     if (dist2(F.px, F.pz, F.bx, F.bz) < 80 * PX) hurtPlayer(dmg, a.id);
-    else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'MISS!', 'miss'); }
+    else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   } else if (a.pattern === 'cone') {
     const R = t.r;
     const d = dist2(F.px, F.pz, F.bx, F.bz);
@@ -493,19 +522,23 @@ function resolveAttack(a, t) {
     if (diff > Math.PI) diff = Math.PI * 2 - diff;
     if (d < R + 0.5 && diff < 1.1 / 2 + 0.25) {
       hurtPlayer(dmg, a.id);
-      arena.burst(F.px, F.pz, 0xe8322a, 8, 4);
-    } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'MISS!', 'miss'); }
+      arena.burst(F.px, F.pz, 0xff5a4e, 8, 4);
+    } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   } else {
     const R = a.pattern === 'melee' ? 70 * PX : a.range_px * PX * 0.55;
     if (a.damage === 0) { // decoy-feint follow-through: scary, harmless
       F.events.push('boss feinted');
-      spawnPop(F.px, 1.8, F.pz, 'FEINT!', 'miss');
+      spawnPop(F.px, 1.8, F.pz, 'PSYCH!', 'miss');
       return;
     }
     if (dist2(F.px, F.pz, t.x, t.z) < R + 14 * PX) {
       hurtPlayer(dmg, a.id);
-      arena.burst(t.x, t.z, 0xe8322a, 8, 4);
-    } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'MISS!', 'miss'); }
+      arena.burst(t.x, t.z, 0xff5a4e, 8, 4);
+      if (a.pattern === 'aoe_circle') { // slam craters the floor
+        arena.spawnCrack(t.x, t.z, Math.random() * Math.PI * 2, 1.2);
+        arena.dust(t.x, t.z, 10, 0xd8c49a, 4);
+      }
+    } else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   }
 }
 
@@ -543,7 +576,7 @@ function update(dt) {
   if (F.cfg.id === 'cinderjaw' && !F.flying && F.bhp < F.cfg.hp * 0.5) {
     F.flying = true;
     arena.setFlight(true);
-    showBanner('CINDERJAW TAKES FLIGHT', 'WINGS UP - THE SKY IS HERS', 'she rains skyfire: keep moving, hero');
+    showBanner('CINDERJAW TAKES FLIGHT', 'WINGS UP - THE SKY IS HERS', 'she rains skyfire: keep moving, hero', '#ff7a3c');
     setVignette(true);
     say('WINGS UP, hero - the sky is MINE!');
     F.events.push('boss took flight');
@@ -648,10 +681,10 @@ function finish(won) {
     const beaten = loadLadder();
     if (beaten.indexOf(F.cfg.id) === -1) { beaten.push(F.cfg.id); saveLadder(beaten); }
     say('*faints dramatically* ...well fought, hero!');
-    showBanner('★ ' + F.cfg.name.toUpperCase() + ' FAINTED ★', 'WELL FOUGHT, HERO!', 'worth sending to your brother');
-    arena.burst(F.bx, F.bz, 0xffd75e, 16, 5, 1.0 + F.flyY);
+    showBanner('★ ' + F.cfg.name.toUpperCase() + ' FAINTED ★', 'WELL FOUGHT, HERO!', 'worth sending to your brother', '#ffd75e');
+    arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
   } else {
-    showBanner('SO CLOSE, HERO', 'THAT BOSS GOT LUCKY', 'shake it off - you were learning its moves');
+    showBanner('SO CLOSE, HERO', 'THAT BOSS GOT LUCKY', 'shake it off - you were learning its moves', '#ff5a4e');
   }
   const mySeq = F.mySeq;
   setTimeout(() => { if (F && F.mySeq === mySeq) showEnd(r); }, won ? 1200 : 600);
@@ -748,12 +781,19 @@ function boot() {
 
   let last = performance.now();
   const loop = (t) => {
-    const dt = Math.min((t - last) / 1000, 0.05);
+    const rawDt = (t - last) / 1000;
+    const dt = Math.min(rawDt, 0.05);
     last = t;
+    let frozen = false;
     if (state === 'fight' && F && !F.over) {
-      try { update(dt); } catch (err) { console.error(err); }
+      if (F.stopT > 0) { // impact freeze: hold the frame, burn the timer
+        F.stopT -= rawDt;
+        frozen = true;
+      } else {
+        try { update(dt); } catch (err) { console.error(err); }
+      }
     }
-    try { arena.frame(dt, t / 1000); } catch (err) { console.error(err); }
+    try { arena.frame(frozen ? 0 : dt, t / 1000); } catch (err) { console.error(err); }
     requestAnimationFrame(loop);
   };
 

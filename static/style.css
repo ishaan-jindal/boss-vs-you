@@ -1,21 +1,29 @@
-/* BOSS vs YOU — neo-brutalist comic. Thick black borders, hard offset shadows,
- * flat saturated colour, tilted accents. HUD/menus are DOM; the fight is Three.js.
- * System stacks only; icons are text glyphs, never emoji.
+/* BOSS vs YOU — gritty comic brawler. Bright neo-brutalist base, heavy hits:
+ * thick black borders, oversized offset shadows, scuffed panels, starburst
+ * damage pops, dark splash banners. HUD/menus are DOM; the fight is Three.js.
+ * Grit is impact and wear — never blood, never horror. System stacks only;
+ * icons are text glyphs, never emoji.
  */
 :root {
   --paper: #fff6e3;
+  --panel-2: #fff2d8;
+  --card: #ffffff;
   --ink: #14100c;
+  --ink-dim: #5c5546;
+  --pitch: #14100c;
   --gold: #ffd75e;
   --gold-deep: #c9962e;
   --hero: #4da3ff;
   --danger: #e8322a;
+  --danger-hot: #ff4a1e;
   --danger-deep: #8f140e;
   --moss: #3fa34d;
   --smoke: #8a6bc9;
   --ember: #e0572b;
   --ok: #2e8b3d;
   --sky: #ffe9c4;
-  --shadow: 5px 5px 0 var(--ink);
+  --dust: #d8c49a;
+  --shadow: 6px 6px 0 var(--ink);
   --sat: env(safe-area-inset-top, 0px);
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left, 0px);
@@ -50,7 +58,11 @@ html, body {
 }
 .screen.active { display: flex; }
 .panel {
-  background: var(--paper);
+  /* scuffed paper: faint scratch lines over warm white, heavy black drop */
+  background:
+    repeating-linear-gradient(115deg, transparent 0 18px, rgba(20, 16, 12, 0.035) 18px 20px),
+    repeating-linear-gradient(28deg, transparent 0 26px, rgba(20, 16, 12, 0.025) 26px 28px),
+    linear-gradient(180deg, var(--card), var(--paper));
   border: 4px solid var(--ink);
   box-shadow: 8px 8px 0 var(--ink);
   padding: 26px 30px;
@@ -61,7 +73,7 @@ html, body {
 .kicker {
   display: inline-block;
   font-size: 13px; font-weight: 800; letter-spacing: 0.3em;
-  background: var(--ink); color: var(--gold);
+  background: var(--pitch); color: var(--gold);
   padding: 6px 14px; margin: 0 0 10px;
   transform: rotate(-2deg);
 }
@@ -75,21 +87,21 @@ html, body {
 .title span { color: var(--danger); }
 .title.small { font-size: clamp(30px, 6vw, 48px); }
 .tilt { transform: rotate(-2deg); }
-.tagline { font-size: 17px; font-weight: 600; margin: 8px 0 16px; }
-.status { font-size: 14px; font-weight: 600; opacity: 0.75; }
-.footnote { font-size: 12px; opacity: 0.6; margin-bottom: 0; }
+.tagline { font-size: 17px; font-weight: 600; margin: 8px 0 16px; color: var(--ink); }
+.status { font-size: 14px; font-weight: 600; opacity: 0.8; color: var(--ink-dim); }
+.footnote { font-size: 12px; opacity: 0.65; margin-bottom: 0; color: var(--ink-dim); }
 
 /* controls card */
 .controls-card {
   border: 3px solid var(--ink);
   box-shadow: var(--shadow);
-  background: #fff;
+  background: var(--card);
   padding: 12px 16px;
   margin: 0 0 18px;
   text-align: left;
   transform: rotate(0.6deg);
 }
-.controls-card h2 { margin: 0 0 8px; font-size: 15px; letter-spacing: 0.15em; }
+.controls-card h2 { margin: 0 0 8px; font-size: 15px; letter-spacing: 0.15em; color: var(--ink); }
 #controls-list { list-style: none; margin: 0; padding: 0; }
 #controls-list li {
   display: flex; justify-content: space-between; gap: 12px;
@@ -98,24 +110,25 @@ html, body {
 }
 #controls-list li:first-child { border-top: none; }
 #controls-list b { background: var(--ink); color: #fff; padding: 2px 8px; white-space: nowrap; }
+#controls-list span { color: var(--ink); }
 
-/* buttons */
+/* buttons: heavy slabs that beg to be slammed */
 .big-btn {
   display: inline-block;
   font: inherit; font-weight: 900; font-size: 20px;
-  background: var(--gold); color: var(--ink);
+  background: var(--gold); color: var(--pitch);
   border: 4px solid var(--ink);
   box-shadow: var(--shadow);
   padding: 14px 26px; margin: 4px 6px;
   cursor: pointer;
   transform: rotate(-1deg);
 }
-.big-btn:active { transform: rotate(-1deg) translate(3px, 3px); box-shadow: 2px 2px 0 var(--ink); }
+.big-btn:active { transform: rotate(-1deg) translate(4px, 4px); box-shadow: 2px 2px 0 var(--ink); }
 .big-btn.alt { background: var(--hero); color: #fff; text-shadow: 2px 2px 0 var(--ink); }
 .ghost-btn {
   display: inline-block;
   font: inherit; font-weight: 800; font-size: 17px;
-  background: #fff; color: var(--ink);
+  background: var(--card); color: var(--ink);
   border: 3px solid var(--ink);
   box-shadow: 4px 4px 0 var(--ink);
   padding: 10px 22px; margin: 10px 6px 0;
@@ -129,7 +142,10 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 .boss-card {
   display: flex; align-items: center; gap: 14px;
   font: inherit; text-align: left; cursor: pointer;
-  background: #fff; color: var(--ink);
+  background:
+    repeating-linear-gradient(115deg, transparent 0 18px, rgba(20, 16, 12, 0.03) 18px 20px),
+    var(--card);
+  color: var(--ink);
   border: 4px solid var(--ink);
   border-left: 16px solid var(--accent, var(--gold));
   box-shadow: var(--shadow);
@@ -137,24 +153,25 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 }
 .boss-card:nth-child(odd) { transform: rotate(-0.6deg); }
 .boss-card:nth-child(even) { transform: rotate(0.6deg); }
-.boss-card.locked { opacity: 0.55; cursor: not-allowed; filter: grayscale(0.7); }
-.boss-card.beaten { background: #fff8dc; }
+.boss-card.locked { opacity: 0.6; cursor: not-allowed; filter: grayscale(0.7); }
+.boss-card.beaten { background: #fff8dc; border-left-color: var(--gold); }
 .medal {
   flex: 0 0 64px; width: 64px; height: 64px;
   display: flex; align-items: center; justify-content: center;
   font-size: 34px; font-weight: 900;
   background: var(--accent, var(--gold));
+  color: var(--pitch);
   border: 3px solid var(--ink); border-radius: 50%;
 }
 .boss-meta { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.boss-name { font-weight: 900; font-size: 18px; }
+.boss-name { font-weight: 900; font-size: 18px; color: var(--ink); }
 .boss-pace { font-size: 12px; font-weight: 800; color: var(--danger-deep); }
-.boss-title { font-size: 13px; font-style: italic; }
-.boss-tease { font-size: 12px; font-weight: 600; opacity: 0.7; }
+.boss-title { font-size: 13px; font-style: italic; color: var(--ink); }
+.boss-tease { font-size: 12px; font-weight: 600; opacity: 0.7; color: var(--ink-dim); }
 .ribbon {
   flex: 0 0 auto;
   font-size: 12px; font-weight: 900;
-  background: var(--ink); color: var(--gold);
+  background: var(--pitch); color: var(--gold);
   padding: 6px 10px; transform: rotate(2deg);
 }
 
@@ -177,7 +194,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 }
 .hp-panel.boss { transform: rotate(0.8deg); }
 .hp-panel.you { transform: rotate(-0.8deg); }
-.hp-label { display: block; font-size: 14px; font-weight: 900; margin-bottom: 4px; }
+.hp-label { display: block; font-size: 14px; font-weight: 900; margin-bottom: 4px; color: var(--ink); }
 .hpbar {
   position: relative;
   height: 20px;
@@ -188,7 +205,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 .hpfill { height: 100%; width: 100%; transition: width 0.15s linear; }
 .hpfill.you { background: var(--hero); }
 .hpfill.boss { background: var(--danger); }
-.hpnum { display: block; font-size: 13px; font-weight: 900; margin-top: 3px; }
+.hpnum { display: block; font-size: 13px; font-weight: 900; margin-top: 3px; color: var(--ink); }
 .potions { display: block; font-size: 12px; font-weight: 800; color: var(--ok); }
 .hp-mid { text-align: center; }
 #clock {
@@ -202,7 +219,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 #cooldowns {
   display: block; margin-top: 4px;
   font-size: 11px; font-weight: 800;
-  background: rgba(255, 246, 227, 0.9);
+  background: rgba(255, 246, 227, 0.92); color: var(--ink);
   border: 2px solid var(--ink);
   padding: 2px 8px;
 }
@@ -300,23 +317,33 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
   transform: translateX(-50%) rotate(45deg);
 }
 
-/* damage pops (projected from 3D) */
+/* damage pops (projected from 3D): loud comic SFX, never gore.
+ * Landed hits get a jagged black starburst slab behind the word. */
 #pop-layer { position: fixed; inset: 0; z-index: 13; pointer-events: none; overflow: hidden; }
 .pop {
   position: absolute;
-  transform: translate(-50%, -50%) rotate(-4deg);
-  font-weight: 900; font-size: 30px;
+  transform: translate(-50%, -50%) rotate(-6deg);
+  font-weight: 900; font-size: 32px;
   color: #fff;
-  -webkit-text-stroke: 1.5px var(--ink);
+  -webkit-text-stroke: 2px var(--ink);
   text-shadow: 3px 3px 0 var(--ink);
   animation: pop-rise 0.7s ease-out forwards;
   white-space: nowrap;
 }
+.pop.hit, .pop.special, .pop.bad { z-index: 1; }
+.pop.hit::before, .pop.special::before, .pop.bad::before {
+  content: ""; position: absolute; z-index: -1;
+  inset: -20px -30px;
+  background: var(--ink);
+  clip-path: polygon(50% 0%, 58% 18%, 75% 8%, 74% 28%, 94% 26%, 84% 42%, 100% 52%, 84% 60%, 93% 77%, 73% 74%, 71% 94%, 58% 80%, 48% 98%, 40% 79%, 22% 90%, 25% 71%, 5% 70%, 16% 55%, 0% 44%, 18% 38%, 13% 19%, 31% 24%, 36% 5%, 45% 20%);
+  transform: rotate(9deg);
+}
 .pop.hit { color: var(--gold); }
-.pop.special { color: var(--gold); font-size: 38px; }
-.pop.bad { color: #ff6a5e; font-size: 34px; }
+.pop.special { color: var(--gold); font-size: 42px; }
+.pop.special::before { inset: -24px -36px; background: var(--danger-deep); }
+.pop.bad { color: var(--danger-hot); font-size: 36px; }
 .pop.miss { color: #fff; font-size: 22px; opacity: 0.95; }
-.pop.heal { color: #7cff6b; }
+.pop.heal { color: #4dff5e; }
 @keyframes pop-rise {
   0% { opacity: 0; margin-top: 10px; }
   15% { opacity: 1; }
@@ -330,9 +357,9 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 /* ---------- end panel ---------- */
 #end-stats { display: flex; gap: 10px; justify-content: center; margin: 12px 0; flex-wrap: wrap; }
 .stat-card {
-  border: 3px solid var(--ink);
-  box-shadow: 4px 4px 0 var(--ink);
-  background: var(--ink); color: var(--gold);
+  border: 3px solid var(--gold);
+  box-shadow: 4px 4px 0 #000;
+  background: var(--pitch); color: var(--gold);
   padding: 10px 16px; min-width: 96px;
   transform: rotate(-1deg);
 }
@@ -350,27 +377,29 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 #bv-vignette.on { opacity: 1; }
 #bv-flash {
   position: fixed; inset: 0; z-index: 9; pointer-events: none; opacity: 0;
-  background: radial-gradient(100% 100% at 50% 50%, rgba(255, 215, 94, 0.28), rgba(232, 50, 42, 0.34));
+  background: radial-gradient(100% 100% at 50% 50%, rgba(255, 246, 232, 0.75), rgba(255, 74, 30, 0.5));
 }
-#bv-flash.hit { animation: bv-flash-hit 0.22s ease-out; }
+#bv-flash.hit { animation: bv-flash-hit 0.3s ease-out; }
 @keyframes bv-flash-hit { 0% { opacity: 1; } 100% { opacity: 0; } }
 #bv-banner {
+  --splash: var(--danger);
   position: fixed; z-index: 14; pointer-events: none;
   left: 50%; top: 32%; transform: translate(-50%, -50%) rotate(-2deg) scale(0.9);
   min-width: min(560px, 86vw); max-width: 92vw;
-  text-align: center; padding: 14px 28px 16px;
-  background: var(--ink); color: var(--paper);
-  border: 4px solid var(--danger);
-  box-shadow: 6px 6px 0 #000, 0 0 44px rgba(232, 50, 42, 0.65);
+  text-align: center; padding: 16px 28px 18px;
+  background: linear-gradient(180deg, #141126, var(--pitch));
+  color: var(--ink);
+  border: 4px solid var(--splash);
+  box-shadow: 6px 6px 0 #000, 0 0 60px var(--splash);
   opacity: 0;
 }
 #bv-banner.show { animation: bv-banner-in 2.2s ease forwards; }
-#bv-banner-kicker { display: block; font-size: 13px; letter-spacing: 0.35em; font-weight: 800; color: var(--danger); }
+#bv-banner-kicker { display: block; font-size: 13px; letter-spacing: 0.35em; font-weight: 800; color: var(--splash); }
 #bv-banner-title {
   display: block; font-weight: 900; font-size: clamp(28px, 6vw, 50px);
-  color: var(--gold); text-shadow: 2px 2px 0 var(--danger-deep);
+  color: var(--gold); text-shadow: 2px 2px 0 #000, 3px 3px 0 var(--danger-deep);
 }
-#bv-banner-sub { display: block; font-size: clamp(13px, 2.4vw, 17px); font-style: italic; opacity: 0.85; }
+#bv-banner-sub { display: block; font-size: clamp(13px, 2.4vw, 17px); font-style: italic; opacity: 0.9; color: var(--ink); }
 @keyframes bv-banner-in {
   0% { opacity: 0; transform: translate(-50%, -50%) rotate(-2deg) scale(0.7); }
   12% { opacity: 1; transform: translate(-50%, -50%) rotate(-2deg) scale(1.06); }
@@ -394,7 +423,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 }
 .noscript {
   position: fixed; z-index: 20; left: 50%; top: 40%; transform: translate(-50%, -50%);
-  background: var(--paper); border: 4px solid var(--ink); padding: 20px 26px; max-width: 88vw;
+  background: var(--paper); color: var(--ink); border: 4px solid var(--ink); padding: 20px 26px; max-width: 88vw;
 }
 
 /* small screens: shrink HUD + buttons stay thumbable */
