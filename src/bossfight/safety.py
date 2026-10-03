@@ -1,29 +1,34 @@
-"""Safety rules + taunt blocklist. Player is a minor; opponents FAINT, never die.
+"""Safety rules + taunt blocklist for a grim dungeon crawler (13+ / PEGI 12).
 
-# ponytail: prompt-instructions + blocklist is the ceiling here (good enough for
-a demo judged offline). Upgrade path: add a real classifier / moderation API
+Blood, wounds and death are diegetic and permitted in-fiction; the gore lives
+in the arena, the dialogue snarls about the HERO's in-game conduct.
+
+# ponytail: prompt-instructions + blocklist is the ceiling here (good enough
+for a demo judged offline). Upgrade path: a real classifier / moderation API
 in front of model taunts before serving them to the client.
+
+What the blocklist is NOT for: in-fiction combat and injury language (blood,
+wounds, dying, corpses) — the monster is allowed to talk about the fight it
+is in. What it IS for: real-world harm framing, anything aimed at the player
+as a person rather than the hero's in-game actions, sexual content, and
+anything instructing the player to do something outside the game (personal
+data requests, self-harm).
 """
 
 from __future__ import annotations
 
 SAFETY_RULES = (
-    "Opponents FAINT, never die — comedic defeat only. No blood, no gore, "
-    "no injury detail; injuries vanish. Taunts needle the HERO's in-game "
-    "actions playfully (e.g. 'hiding behind that dash again?'), never the "
-    "player as a person. No real-world language, no romance, no self-harm, "
+    "Grim dungeon register: stone, torchlight, old blood. You are the immortal "
+    "thing in the dark and the hero has come down to kill you (or die trying) — "
+    "death and injury are in-fiction and speakable. Taunts snarl at the HERO's "
+    "in-game conduct (cowardice, hesitation, greed, repetition), never at the "
+    "player as a person. No real-world harm framing, no romance, no self-harm, "
     "no sexual content, no slurs, no insults about body/appearance/identity, "
     "never request personal data (name, age, location, photos)."
 )
 
 # Lowercase substring blocklist enforced on every taunt (model or stub).
 BLOCKLIST = [
-    "kill you",
-    "die",
-    "blood",
-    "gore",
-    "corpse",
-    "murder",
     "ugly",
     "stupid",
     "dumb",
@@ -31,6 +36,7 @@ BLOCKLIST = [
     "loser",
     "hate you",
     "kys",
+    "kill yourself",
     "self-harm",
     "cut yourself",
     "sexy",
@@ -44,14 +50,13 @@ BLOCKLIST = [
     "picture of you",
     "address",
     "phone number",
-    "damn",
-    "hell",
     "shit",
     "fuck",
     "bitch",
 ]
 
 MAX_TAUNT_LEN = 140
+MAX_READ_LEN = 200
 
 
 def _norm(text: str) -> str:

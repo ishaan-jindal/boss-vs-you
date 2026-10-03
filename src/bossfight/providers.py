@@ -32,9 +32,20 @@ LAST_USAGE: dict = {}
 
 
 class BrainFields(BaseModel):
-    tactic_id: str
+    """Model-parsed reply: tactic weights + next body + when to take it.
+
+    Tactic keys are free-form weights (client samples per tick); next_form
+    must name a body in bosses.FORMS. Any malformed field fails validation so
+    the caller retries once, then falls back to rules — never a 500.
+    """
+
+    tactics: dict[str, float]
+    next_form: str
+    transform_now: bool = False
+    open_with: str = ""
     taunt: str = Field(max_length=140)
-    intensity: float = Field(default=0.5, ge=0.0, le=1.0)
+    read: str = Field(default="", max_length=200)
+    intensity: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
 def keys() -> tuple[str | None, str | None]:

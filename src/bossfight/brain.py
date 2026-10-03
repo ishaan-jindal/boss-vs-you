@@ -1,7 +1,8 @@
-"""The brain: picks a tactic exploiting the hero's pattern + a taunt.
+"""The brain: reads the hero's habits, returns tactic weights + the next body.
 
-Client sends full state each call (stateless server). Validation failures
-→ retry once → rule-based fallback. Never a 500 from a bad model.
+Client sends full state each call (stateless server). Sequence guard: seq is
+echoed verbatim and the client applies a reply only if newer. Validation
+failures → retry once → rule-based fallback. Never a 500 from a bad model.
 """
 
 from __future__ import annotations
@@ -10,99 +11,201 @@ from pydantic import BaseModel, Field
 
 from . import bosses
 from .providers import generate, stubbed
-from .safety import SAFETY_RULES, is_taunt_clean
+from .safety import MAX_READ_LEN, MAX_TAUNT_LEN, SAFETY_RULES, is_taunt_clean
 
 
 class BrainRequest(BaseModel):
     boss_id: str
-    tick: int = 0
+    seq: int = 0  # monotonic; echoed back unchanged
+    descent: int = 1
+    form: str = "crawler"
     boss_hp_pct: float = 100.0
     player_hp_pct: float = 100.0
-    player_style: str = Field(default="mobile", pattern="^(turtly|mobile|aggressive)$")
-    current_tactic: str = ""
-    phase: str = ""
-    threats: list[str] = Field(default_factory=list)
+    habits: dict[str, float] = Field(default_factory=dict)
+    build: list[str] = Field(default_factory=list)
+    fight_secs: float = 0.0
+    last_damage_source: str = ""
+    history: list[str] = Field(default_factory=list)
 
 
 class BrainResponse(BaseModel):
-    tactic_id: str
-    taunt: str
-    intensity: float = 0.5
+    seq: int
+    tactics: dict[str, float]  # weights, non-empty, values >= 0
+    next_form: str  # one of bosses.FORMS
+    transform_now: bool = False
+    open_with: str = ""  # attack id or tactic id, may be ""
+    taunt: str  # <= 140 chars, blocklist-checked
+    read: str = ""  # <= 200 chars, the boss's read on the player
+    intensity: float = 0.7
 
 
-# Stub canned taunts per boss (all clean, playful, in-voice).
+# Stub taunts per boss (all clean, grim dungeon register, in-voice).
 STUB_TAUNTS: dict[str, list[str]] = {
     "smoke-courier": [
-        "Special delivery, hero — try to keep up!",
-        "That dash leaves footprints. I read them like mail.",
-        "Blink twice and you're dizzy, hero!",
+        "You run messages through smoke, hero. I read every one.",
+        "That dash kicks dust. The dark keeps count.",
+        "Hide behind the gloom again. It will not hide you.",
     ],
     "cinderjaw": [
-        "Flap those feet, hero — floor's lava-ish!",
-        "One sneeze and you're toast. Kidding. Mostly.",
-        "Well done — nicely toasted on both sides!",
+        "Little ember, well done — come closer to the flame.",
+        "I swallowed whole war-bands. You are one mouthful.",
+        "Bleed on the stone, hero. Feed the floor.",
     ],
     "briar-knight": [
-        "Swing, swing. My thorns keep count, hero.",
-        "Patience is a garden, and you walked into it.",
-        "Careful with that button — the thorns tickle back.",
+        "Swing, swing. My thorns keep count of every cut.",
+        "Patience is a grave-garden, and you walked into it.",
+        "That guard is a coffin lid. I am the nails.",
     ],
 }
 
-# Style → tactic index hint so the stub visibly adapts, not just rotates.
-STYLE_HINT: dict[str, int] = {"turtly": 1, "mobile": 0, "aggressive": 2}
+DEFAULT_TAUNT = "Come down, hero. The stone remembers every step."
+
+# Weight keys match the plan's example; the client samples per tick, so the
+# model's contribution is a continuous bias, not a discrete pick.
+TACTIC_KEYS = ("pressure", "bait", "bombs")
+
+
+def _uniform_weights() -> dict[str, float]:
+    # ponytail: flat uniform is the ceiling for a fallback (any "smart"
+    # fallback is just the stub with extra steps). Upgrade path: weight by
+    # the current form's kit if forms ever grow distinct signatures.
+    w = 1.0 / len(TACTIC_KEYS)
+    return {k: w for k in TACTIC_KEYS}
+
+
+def _clamp01(x: float) -> float:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, v))
+
+
+def _fallback_form(req: BrainRequest) -> str:
+    return req.form if bosses.legal_form(req.form) else "crawler"
 
 
 def stub_decide(req: BrainRequest) -> BrainResponse:
-    """Rule-based fallback: cycle tactics across ticks, adapt slightly to style.
+    """Rule-based floor and offline ground truth: habits in, counter out.
 
-    Cycles so consecutive ticks don't stick on one tactic.
+    Turtling (high turtle_ratio / stationary_ratio) draws bait-heavy weights
+    and the fast wraith body; heat (aggression / dash_spam) draws
+    pressure-heavy weights and the armoured colossus; anything else holds the
+    current body with balanced weights. Turtling vs aggression therefore plays
+    visibly differently even with no model — the proof the contract is
+    load-bearing rather than decorative.
     """
-    tactics = bosses.tactic_ids(req.boss_id)
-    if not tactics:
-        return BrainResponse(
-            tactic_id="default", taunt="Let's see what you've got, hero!", intensity=0.5
-        )
-    hint = STYLE_HINT.get(req.player_style, 0)
-    idx = (req.tick + hint) % len(tactics)
-    # Avoid echoing the current tactic when alternatives exist.
-    if len(tactics) > 1 and tactics[idx] == req.current_tactic:
-        idx = (idx + 1) % len(tactics)
-    taunts = STUB_TAUNTS.get(req.boss_id, ["En garde, hero — show me your footwork!"])
-    taunt = taunts[req.tick % len(taunts)]
-    intensity = (
-        0.85
-        if req.boss_hp_pct < 30
-        else (0.65 if req.player_style == "aggressive" else 0.5)
+    habits = req.habits or {}
+    turtle = _clamp01(
+        max(habits.get("turtle_ratio", 0.0), habits.get("stationary_ratio", 0.0))
     )
-    return BrainResponse(tactic_id=tactics[idx], taunt=taunt, intensity=intensity)
+    heat = _clamp01(max(habits.get("aggression", 0.0), habits.get("dash_spam", 0.0)))
+
+    if turtle >= 0.5 and turtle >= heat:
+        tactics = {"pressure": 0.2, "bait": 0.6, "bombs": 0.2}
+        next_form = "wraith"
+        read = (
+            f"you turtle and guard (turtle_ratio {turtle:.2f}); "
+            "it will hold ground and bait the dash"
+        )
+    elif heat >= 0.5:
+        tactics = {"pressure": 0.65, "bait": 0.15, "bombs": 0.2}
+        next_form = "colossus"
+        read = (
+            f"you rush and trade hits (heat {heat:.2f}); "
+            "it will armour up and punish the approach"
+        )
+    else:
+        tactics = {"pressure": 0.4, "bait": 0.3, "bombs": 0.3}
+        next_form = _fallback_form(req)
+        read = "you mix ranges and tempo; it will press and probe for a habit"
+
+    # A mid-fight morph is a set-piece, not a tick: only bleed-driven, and
+    # the client rate-limits to one per fight regardless.
+    transform_now = next_form != _fallback_form(req) and req.boss_hp_pct < 30
+    open_with = max(TACTIC_KEYS, key=lambda k: tactics[k])
+    taunts = STUB_TAUNTS.get(req.boss_id, [DEFAULT_TAUNT])
+    taunt = taunts[req.seq % len(taunts)]
+    intensity = 0.85 if req.boss_hp_pct < 30 else (0.7 if heat >= 0.5 else 0.55)
+    return BrainResponse(
+        seq=req.seq,
+        tactics=tactics,
+        next_form=next_form,
+        transform_now=transform_now,
+        open_with=open_with,
+        taunt=taunt,
+        read=read,
+        intensity=intensity,
+    )
 
 
 def build_prompt(req: BrainRequest) -> str:
     b = bosses.get_boss(req.boss_id) or {}
-    tactics = "\n".join(
-        f"- {t['id']}: {t['description']}" for t in b.get("tactics", [])
-    )
     voice = "\n".join(f'- "{line}"' for line in b.get("taunt_voice", []))
-    threats = "; ".join(req.threats) if req.threats else "none yet"
+    habits = (
+        "; ".join(f"{k}={v:.2f}" for k, v in sorted(req.habits.items())) or "none yet"
+    )
+    build = ", ".join(req.build) or "none yet"
+    notes = "; ".join(req.history[-4:]) or "none yet"
     return (
-        f"You are {b.get('name', 'a boss')}, {b.get('title', '')} in a playful kids' "
-        "action game (opponents FAINT, never die; comedic, no blood/gore).\n"
+        f"You are {b.get('name', 'the immortal thing in the dark')}, "
+        f"{b.get('title', 'it always gets up')} in a grim dungeon crawler — "
+        "stone, torchlight, old blood. The hero has ONE life; you are immortal "
+        "and you learn.\n"
         f"{SAFETY_RULES}\n"
-        f"Tactics (reply with EXACTLY one of these ids):\n{tactics}\n"
+        f"Your bodies (reply with EXACTLY one of these ids): "
+        f"{', '.join(bosses.FORMS)}. Crawler is baseline melee, wraith is fast "
+        "and punishes turtling, colossus is armoured and punishes trading hits, "
+        "hollow is erratic and punishes pattern.\n"
         f"Your voice (match this flavour):\n{voice}\n"
-        f"State: tick={req.tick} boss_hp={req.boss_hp_pct:.0f}% "
-        f"hero_hp={req.player_hp_pct:.0f}% hero_style={req.player_style} "
-        f"phase={req.phase or bosses.phase_for(req.boss_hp_pct)} "
-        f"current_tactic={req.current_tactic or 'none'} recent_events=[{threats}]\n"
-        "Pick the tactic that best exploits the hero's pattern and a playful "
-        "taunt (<=140 chars) reacting to recent events. "
-        'Reply ONLY with JSON: {"tactic_id": "...", "taunt": "...", "intensity": 0.0-1.0}.'
+        f"State: seq={req.seq} descent={req.descent} form={req.form} "
+        f"boss_hp={req.boss_hp_pct:.0f}% hero_hp={req.player_hp_pct:.0f}% "
+        f"fight_secs={req.fight_secs:.0f} last_damage=[{req.last_damage_source or 'none'}] "
+        f"habits=[{habits}] build=[{build}] recent=[{notes}]\n"
+        "Return tactic WEIGHTS (keys pressure/bait/bombs, values >= 0) biasing "
+        "how it hunts this hero, the body it should wear next, whether to take "
+        "that body NOW mid-fight (true only to punish something you just saw) "
+        "or on return, what to open with, a grim taunt "
+        f"(≤{MAX_TAUNT_LEN} chars) naming what just happened, and your read on "
+        f"the hero (≤{MAX_READ_LEN} chars). "
+        'Reply ONLY with JSON: {"tactics": {"pressure": 0.0-1.0, "bait": 0.0-1.0, '
+        '"bombs": 0.0-1.0}, "next_form": "...", "transform_now": false, '
+        '"open_with": "...", "taunt": "...", "read": "...", "intensity": 0.0-1.0}.'
     )
 
 
-def _legal(req: BrainRequest, tactic_id: str, taunt: str) -> bool:
-    return tactic_id in bosses.tactic_ids(req.boss_id) and is_taunt_clean(taunt)
+def _weights_ok(tactics: dict[str, float]) -> bool:
+    # NaN fails the >= 0 comparison, so it is rejected here, not sampled.
+    return bool(tactics) and all(
+        isinstance(v, (int, float)) and v >= 0 for v in tactics.values()
+    )
+
+
+def _legal(req: BrainRequest, out) -> bool:
+    return (
+        bosses.legal_form(out.next_form)
+        and _weights_ok(out.tactics)
+        and is_taunt_clean(out.taunt)
+    )
+
+
+def _respond(req: BrainRequest, out) -> BrainResponse:
+    # Defensive re-derivation: legal replies pass through unchanged; illegal
+    # weights/form resolve to the deterministic floor instead of a 500.
+    tactics = dict(out.tactics) if _weights_ok(out.tactics) else _uniform_weights()
+    next_form = (
+        out.next_form if bosses.legal_form(out.next_form) else _fallback_form(req)
+    )
+    return BrainResponse(
+        seq=req.seq,
+        tactics=tactics,
+        next_form=next_form,
+        transform_now=bool(out.transform_now),
+        open_with=out.open_with or "",
+        taunt=out.taunt,
+        read=out.read or "",
+        intensity=out.intensity,
+    )
 
 
 async def decide(req: BrainRequest) -> BrainResponse:
@@ -114,19 +217,15 @@ async def decide(req: BrainRequest) -> BrainResponse:
     # Attempt 1.
     try:
         out = await generate(prompt)
-        if _legal(req, out.tactic_id, out.taunt):
-            return BrainResponse(
-                tactic_id=out.tactic_id, taunt=out.taunt, intensity=out.intensity
-            )
+        if _legal(req, out):
+            return _respond(req, out)
     except Exception:  # noqa: BLE001 — retry once below
         pass
     # Retry once.
     try:
         out = await generate(prompt)
-        if _legal(req, out.tactic_id, out.taunt):
-            return BrainResponse(
-                tactic_id=out.tactic_id, taunt=out.taunt, intensity=out.intensity
-            )
+        if _legal(req, out):
+            return _respond(req, out)
     except Exception:  # noqa: BLE001 — fall through to rule-based fallback
         pass
     return stub_decide(req)

@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import bosses
-from .brain import BrainRequest, BrainResponse, decide
+from .balance import balance_summary
+from .brain import BrainRequest, BrainResponse, decide, stub_decide
 
 STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
@@ -27,15 +28,16 @@ def create_app() -> FastAPI:
     async def list_bosses() -> dict:
         return {"bosses": bosses.BOSSES}
 
+    @app.get("/api/balance")
+    async def balance() -> dict:
+        # One source of truth: constants from balance.py, bodies from bosses.
+        return {**balance_summary(), "forms": list(bosses.FORMS)}
+
     @app.post("/api/brain", response_model=BrainResponse)
     async def brain(req: BrainRequest) -> BrainResponse:
         # Unknown boss → rule-based fallback shape, never 500.
         if bosses.get_boss(req.boss_id) is None:
-            return BrainResponse(
-                tactic_id="default",
-                taunt="En garde, hero — show me your footwork!",
-                intensity=0.5,
-            )
+            return stub_decide(req)
         return await decide(req)
 
     # Static game client (vendored Phaser, zero runtime deps beyond our API).

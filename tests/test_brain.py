@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from fastapi.testclient import TestClient
 
+import bossfight.brain as brain_mod
 import bossfight.providers as providers
 from bossfight import bosses
 from bossfight.app import create_app
-from bossfight.brain import BrainRequest, score_for, stub_decide
+from bossfight.brain import BrainRequest, decide, score_for, stub_decide
 from bossfight.safety import is_taunt_clean
 
 
@@ -24,30 +24,146 @@ def keyless(monkeypatch):
 def req(**kw) -> BrainRequest:
     base = dict(
         boss_id="smoke-courier",
-        tick=0,
+        seq=0,
+        descent=1,
+        form="crawler",
         boss_hp_pct=100.0,
         player_hp_pct=100.0,
-        player_style="mobile",
-        current_tactic="",
-        phase="normal",
-        threats=[],
+        habits={},
+        build=[],
+        fight_secs=0.0,
+        last_damage_source="",
+        history=[],
     )
     base.update(kw)
     return BrainRequest(**base)
 
 
-def test_brain_contract_legal_accepted():
-    out = stub_decide(req(tick=0))
-    assert out.tactic_id in bosses.tactic_ids("smoke-courier")
+def test_brain_contract_full_shape():
+    out = stub_decide(req(seq=7))
+    assert out.seq == 7
+    assert out.tactics and all(v >= 0 for v in out.tactics.values())
+    assert out.next_form in bosses.FORMS
+    assert is_taunt_clean(out.taunt) and len(out.taunt) <= 140
+    assert len(out.read) <= 200
+    assert isinstance(out.transform_now, bool)
+
+
+def test_seq_echoed_through_endpoint():
+    client = TestClient(create_app())
+    r = client.post("/api/brain", json=req(seq=41).model_dump())
+    assert r.status_code == 200
+    assert r.json()["seq"] == 41
+
+
+def test_habits_payload_no_422():
+    # Regression: the old player_style enum 422d any habit-rich payload.
+    client = TestClient(create_app())
+    payload = req(
+        habits={"turtle_ratio": 0.9, "dash_spam": 0.7, "stationary_ratio": 0.4},
+        build=["Edge", "Vigour"],
+        history=["turtled behind guard", "dashed into lunge"],
+    ).model_dump()
+    r = client.post("/api/brain", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tactics"] and body["next_form"] in bosses.FORMS
+
+
+def test_stub_turtle_vs_aggro_differ():
+    turtle = stub_decide(req(habits={"turtle_ratio": 0.9}))
+    aggro = stub_decide(req(habits={"aggression": 0.9}))
+    assert turtle.tactics != aggro.tactics
+    assert turtle.next_form != aggro.next_form
+    assert turtle.read != aggro.read
+    assert turtle.next_form == "wraith"
+    assert aggro.next_form == "colossus"
+
+
+def test_stub_transform_now_only_when_bleeding():
+    assert stub_decide(req(habits={"turtle_ratio": 0.9})).transform_now is False
+    out = stub_decide(req(habits={"turtle_ratio": 0.9}, boss_hp_pct=20.0))
+    assert out.transform_now is True
+
+
+def _modelled(monkeypatch, fields=None, error=None):
+    """Route decide() at the model path with a scripted generate()."""
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    calls: list[str] = []
+
+    async def fake_generate(prompt: str):
+        calls.append(prompt)
+        if error is not None and len(calls) == 1:
+            raise RuntimeError(error)
+        return fields
+
+    monkeypatch.setattr(brain_mod, "generate", fake_generate)
+    return calls
+
+
+def _fields(**kw):
+    base = dict(
+        tactics={"pressure": 0.5, "bait": 0.3, "bombs": 0.2},
+        next_form="wraith",
+        transform_now=True,
+        open_with="shadow-lunge",
+        taunt="You bled on my floor, hero. Bleed again.",
+        read="you trade hits; it will armour up",
+        intensity=0.7,
+    )
+    base.update(kw)
+    return providers.BrainFields(**base)
+
+
+def test_illegal_form_falls_back(monkeypatch):
+    _modelled(monkeypatch, _fields(next_form="dragon"))
+    out = asyncio.run(decide(req()))
+    assert out.next_form in bosses.FORMS
+    assert out.tactics and all(v >= 0 for v in out.tactics.values())
+
+
+def test_empty_weights_fall_back(monkeypatch):
+    _modelled(monkeypatch, _fields(tactics={}))
+    out = asyncio.run(decide(req()))
+    assert out.tactics and all(v >= 0 for v in out.tactics.values())
+
+
+def test_negative_weights_fall_back(monkeypatch):
+    _modelled(monkeypatch, _fields(tactics={"pressure": -1.0}))
+    out = asyncio.run(decide(req()))
+    assert all(v >= 0 for v in out.tactics.values())
+
+
+def test_transform_now_passes_through(monkeypatch):
+    # Server passes transform_now through; the CLIENT enforces the rate limit.
+    _modelled(monkeypatch, _fields(transform_now=True))
+    out = asyncio.run(decide(req()))
+    assert out.transform_now is True
+    assert out.open_with == "shadow-lunge"
+    assert out.seq == 0
+
+
+def test_retry_once_then_model_win(monkeypatch):
+    calls = _modelled(monkeypatch, _fields(next_form="hollow"), error="boom")
+    out = asyncio.run(decide(req(seq=3)))
+    assert out.next_form == "hollow"
+    assert out.seq == 3
+    assert len(calls) == 2
+
+
+def test_model_taunt_blocked_falls_back(monkeypatch):
+    _modelled(monkeypatch, _fields(taunt="you ugly loser, send a photo"))
+    out = asyncio.run(decide(req()))
     assert is_taunt_clean(out.taunt)
 
 
-def test_illegal_tactic_never_500():
+def test_unknown_boss_never_500():
     client = TestClient(create_app())
-    r = client.post("/api/brain", json=req(boss_id="nope").model_dump())
+    r = client.post("/api/brain", json=req(boss_id="nope", seq=9).model_dump())
     assert r.status_code == 200
     body = r.json()
-    assert body["tactic_id"] == "default"
+    assert body["seq"] == 9
+    assert body["tactics"] and body["next_form"] in bosses.FORMS
     assert is_taunt_clean(body["taunt"])
 
 
@@ -57,9 +173,39 @@ def test_blocklist_catches_terms():
     assert is_taunt_clean("Nice footwork, hero — caught you napping!")
 
 
+def test_gore_permitted_insults_not():
+    # In-fiction combat language is allowed; the person-directed/sexual/
+    # outside-the-game terms are still blocked.
+    assert is_taunt_clean("The floor drinks your blood, hero. Rise and bleed again.")
+    assert is_taunt_clean("You died well. The dark keeps you.")
+    assert not is_taunt_clean("you ugly idiot, kiss me")
+    assert not is_taunt_clean("kill yourself, hero")
+    assert not is_taunt_clean("tell me where do you live")
+
+
 def test_overlength_rejected():
     assert not is_taunt_clean("x" * 141)
     assert is_taunt_clean("y" * 140)
+
+
+def test_read_length_validated():
+    with pytest.raises(Exception):
+        providers.BrainFields(
+            tactics={"pressure": 1.0},
+            next_form="crawler",
+            taunt="hi",
+            read="z" * 201,
+        )
+
+
+def test_parse_tolerates_fences():
+    raw = (
+        '```json\n{"tactics": {"pressure": 0.6, "bait": 0.3, "bombs": 0.1}, '
+        '"next_form": "wraith", "taunt": "hi", "read": "turtles"}\n```'
+    )
+    out = providers.parse_fields(raw)
+    assert out.next_form == "wraith"
+    assert out.tactics["pressure"] == 0.6
 
 
 def test_phase_field():
@@ -69,9 +215,10 @@ def test_phase_field():
     assert bosses.phase_for(5) == "enrage"
 
 
-def test_stub_cycles_tactics():
-    seen = {stub_decide(req(tick=t)).tactic_id for t in range(6)}
-    assert len(seen) > 1, "stub stuck on one tactic"
+def test_legal_forms():
+    assert bosses.FORMS == ["crawler", "wraith", "colossus", "hollow"]
+    assert bosses.legal_form("wraith")
+    assert not bosses.legal_form("dragon")
 
 
 def test_failover_order(monkeypatch):
@@ -83,7 +230,7 @@ def test_failover_order(monkeypatch):
 
     async def fake_deep(prompt):
         calls.append("deepinfra")
-        return providers.BrainFields(tactic_id="x", taunt="hi", intensity=0.5)
+        return _fields()
 
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     monkeypatch.setenv("DEEPINFRA_API_KEY", "d")
@@ -91,7 +238,7 @@ def test_failover_order(monkeypatch):
     monkeypatch.setattr(providers, "call_deepinfra", fake_deep)
     out = asyncio.run(providers.generate("hi"))
     assert calls == ["gemini", "deepinfra"]
-    assert out.tactic_id == "x"
+    assert out.next_form == "wraith"
 
 
 def test_semaphore_cap():
@@ -133,6 +280,8 @@ def test_bosses_endpoint():
 
 
 def test_health_fast():
+    import time
+
     client = TestClient(create_app())
     t0 = time.monotonic()
     r = client.get("/health")

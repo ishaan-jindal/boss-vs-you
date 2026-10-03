@@ -290,3 +290,15 @@ def tactic_ids(boss_id: str) -> list[str]:
 def phase_for(boss_hp_pct: float) -> str:
     """'enrage' below 30% boss HP, else 'normal'."""
     return "enrage" if boss_hp_pct < 30 else "normal"
+
+
+# The immortal boss's four bodies. Same creature throughout (long, wrong, too
+# many joints), just wronger. The model picks next_form from this list and the
+# client honours it mid-fight or on return (rate-limited client-side).
+# Kept as plain ids: full per-form kits land with the boss-collapse lane.
+FORMS: list[str] = ["crawler", "wraith", "colossus", "hollow"]
+
+
+def legal_form(form: str) -> bool:
+    """True when the model named a body the game can actually wear."""
+    return form in FORMS
