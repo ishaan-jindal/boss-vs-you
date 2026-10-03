@@ -116,24 +116,22 @@ function balNum(path, fallback) {
 function potionHealFor(maxHp) {
   return balNum(['potion', 'flat'], 30) + balNum(['potion', 'pct_max_hp'], 0.03) * Math.max(0, maxHp);
 }
-// TODO(balance: xp_threshold) — the EXP curve lives with the balance lane.
-// Expected shape: a per-level number, or {base, growth} for
-// base + growth*(level-1). Temp fallback: flat 100 per level.
+/* XP needed for the next level. Mirrors balance.py::exp_to_next exactly —
+ * COMPOUNDED, not linear. A linear reading desynchronises card cadence from
+ * boss scaling, which is precisely what the Python side documents against.
+ * Values arrive in the payload (xp_threshold); the fallback is only for the
+ * window before /api/balance resolves. */
 const XP_THRESHOLD_FALLBACK = 100;
 function xpThreshold(level) {
-  if (!BAL || BAL.xp_threshold == null) return XP_THRESHOLD_FALLBACK;
-  const t = BAL.xp_threshold;
-  if (typeof t === 'number' && isFinite(t) && t > 0) return t;
-  if (typeof t === 'object') {
-    const base = Number(t.base), growth = Number(t.growth || 0);
-    if (isFinite(base) && base > 0) return base + Math.max(0, growth) * (Math.max(1, level) - 1);
-  }
-  return XP_THRESHOLD_FALLBACK;
+  const t = BAL && BAL.xp_threshold;
+  const base = t && typeof t === 'object' ? Number(t.base) : NaN;
+  const growth = t && typeof t === 'object' ? Number(t.growth || 0) : NaN;
+  const b = isFinite(base) && base > 0 ? base : XP_THRESHOLD_FALLBACK;
+  const g = isFinite(growth) && growth > 0 ? growth : 0.10;
+  return Math.floor(b * Math.pow(1 + g, Math.max(0, level - 1)) + 0.5);
 }
-// TODO(balance: descent_par) — the governor's par constants live with the
-// balance lane. Expected shape: {par_base_s, par_per_descent_s} (and
-// optionally {time_cap_s} for the XP time-survived cap, temp 90s).
-// Temp fallback mirrors src/bossfight/balance.py::descent_gain exactly.
+/* Governor par time. The numbers arrive in the payload (descent_par); the
+ * fallbacks match balance.py and only apply before /api/balance resolves. */
 const DESCENT_PAR_BASE_FALLBACK = 90, DESCENT_PAR_PER_LEVEL_FALLBACK = 4, XP_TIME_CAP_FALLBACK_S = 90;
 function descentGain(fightSecs, hpLeftPct, descent) {
   const parBase = balNum(['descent_par', 'par_base_s'], DESCENT_PAR_BASE_FALLBACK);
@@ -145,17 +143,21 @@ function descentGain(fightSecs, hpLeftPct, descent) {
 }
 /* Boss pools scale additively per descent (descent 1 wears the base pool
  * exactly; payload: boss_{hp,dmg,speed}_growth_per_level + speed cap). */
+/* Boss pools scale additively per descent. Offset matches balance.py:
+ * boss_hp(descent) = base * (1 + g * max(0, descent)). An earlier `- 1` here
+ * made descent 1 weaker than Python's own model, which silently desynced the
+ * client from the tuned crossover band. */
 function bossHpPool(def, descent) {
   const g = balNum(['boss_hp_growth_per_level'], 0.05);
-  return Math.round(def.hp * (1 + g * Math.max(0, descent - 1)));
+  return Math.round(def.hp * (1 + g * Math.max(0, descent)));
 }
 function bossDmgMul(descent) {
-  return 1 + balNum(['boss_dmg_growth_per_level'], 0.05) * Math.max(0, descent - 1);
+  return 1 + balNum(['boss_dmg_growth_per_level'], 0.05) * Math.max(0, descent);
 }
 function bossMovePxS(def, descent) {
   const g = balNum(['boss_speed_growth_per_level'], 0.02);
   const cap = balNum(['boss_speed_cap_px_s'], 200);
-  return Math.min(def.move_speed * (1 + g * Math.max(0, descent - 1)), cap);
+  return Math.min(def.move_speed * (1 + g * Math.max(0, descent)), cap);
 }
 function tier2Descent() { return Math.round(balNum(['tier2_descent'], 12)); }
 

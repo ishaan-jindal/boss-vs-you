@@ -63,6 +63,11 @@ EXP_FACTOR_LO = 0.60
 EXP_FACTOR_HI = 0.90
 EXP_CAP_SECS = 90.0  # time-survived EXP stops accruing here per fight
 
+# Descent governor ("par") time. Fight par = base + per_level * descent; beating
+# par counts as fast. Served to the client so the numbers live in one place.
+DESCENT_PAR_BASE_S = 90.0
+DESCENT_PAR_PER_DESCENT_S = 4.0
+
 # Mid-form pool for analytic TTK. Ratios are base-independent; the absolute
 # lands ~12s analytic, i.e. ~1-2 min at real 10-25% uptime. See bosses.py.
 BOSS_BASE_HP = 160.0
@@ -233,6 +238,21 @@ def balance_summary() -> dict:
         "exp_growth": EXP_GROWTH,
         "exp_kill_bonus": EXP_KILL_BONUS,
         "exp_cap_secs": EXP_CAP_SECS,
+        # Served as data so the client never re-implements these curves.
+        # xp_threshold.mode is "compound": a linear reading desynchronises
+        # card cadence from boss scaling (see exp_to_next's comment).
+        "xp_threshold": {
+            "base": EXP_BASE_LEVEL1,
+            "growth": EXP_GROWTH,
+            "mode": "compound",
+        },
+        # Governor constants used by descent_gain. The formula itself stays in
+        # Python and is mirrored in JS, but only these numbers are duplicated.
+        "descent_par": {
+            "par_base_s": DESCENT_PAR_BASE_S,
+            "par_per_descent_s": DESCENT_PAR_PER_DESCENT_S,
+            "xp_time_cap_s": EXP_CAP_SECS,
+        },
         "cards": {
             "edge": {"melee_dmg": EDGE_DMG, "melee_dmg_tier2": EDGE_DMG_TIER2},
             "vigour": {"max_hp": VIGOUR_HP, "max_hp_tier2": VIGOUR_HP_TIER2},
