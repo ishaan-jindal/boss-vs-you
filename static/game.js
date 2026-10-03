@@ -23,12 +23,14 @@
  *   dust, crack decals). Impact feel: hitstop freezes update for a beat on
  *   every landed hit (see hitstop()); shake is heavy on purpose; dust and
  *   cracks sell the weight. All comic, never gore: debris and dust only.
- * localStorage: 'bvy.best_descent' (int, deepest descent ever) and
+ * localStorage: 'bvy.best_descent' (int, deepest descent ever),
  *   'bvy.run_history' (last ≤60 fight records, survives the run — the
- *   attempt log the learning lane reads). Player stats are NEVER persisted.
- *   Learning lane will add 'bvy.habit_profile' (expected shape: an object of
- *   habit counters {turtle_ratio, dash_spam, potion_timing,
- *   attack_range_pref, stationary_ratio, opener, death_causes:{cause:n}}).
+ *   attempt log the learning lane reads) and 'bvy.habit_profile' (the
+ *   derived summary {counters:{turtle_ratio,dash_spam,stationary_ratio,
+ *   potion_timing,attack_range_pref,finish_frac}, lines:{...}, labels:[...],
+ *   fights:n, updatedAt:ms} — THIS is what survives death: written on every
+ *   kill and every death, loaded on run start so run 2 opens with the boss
+ *   already countering run 1). Player stats are NEVER persisted.
  *
  * Combat contract (matches bosses.py numbers exactly):
  * player HP 100, melee dmg 8 @ 0.6s, special 25 @ 12s, dash i-frames 0.25s @ 4s,
@@ -164,6 +166,7 @@ function tier2Descent() { return Math.round(balNum(['tier2_descent'], 12)); }
 /* ---------- run persistence (best + attempt log only, never player stats) ---------- */
 const LS_BEST = 'bvy.best_descent';
 const LS_HISTORY = 'bvy.run_history';
+const LS_HABITS = 'bvy.habit_profile'; // the immortal memory: derived summary, survives death
 const HISTORY_CAP = 60;
 function loadBest() {
   try { return Math.max(0, parseInt(localStorage.getItem(LS_BEST) || '0', 10) || 0); }
@@ -181,6 +184,153 @@ function pushHistory(rec) {
   F.runHistory.push(rec);
   while (F.runHistory.length > HISTORY_CAP) F.runHistory.shift();
   try { localStorage.setItem(LS_HISTORY, JSON.stringify(F.runHistory)); } catch { /* run survives */ }
+}
+
+/* ---------- habit profile: the thing that survives death ----------
+ * summarizeHistory mirrors src/bossfight/habits.py (the Python copy is the
+ * tested ground truth). Counters are shares/means over the last ≤60 fights;
+ * every field optional, missing data degrades to 0, never throws. */
+function summarizeHistory(recs) {
+  const list = Array.isArray(recs)
+    ? recs.slice(-HISTORY_CAP).filter((r) => r && typeof r === 'object')
+    : [];
+  const num = (v) => { const n = Number(v); return isFinite(n) ? n : 0; };
+  let guard = 0, attack = 0, dash = 0, dodges = 0, totalSecs = 0, stillSecs = 0;
+  let fracSum = 0, fracN = 0, rangeSum = 0, rangeN = 0, kills = 0, deaths = 0;
+  const causes = {}, openers = {};
+  for (const r of list) {
+    const mv = (r.moves_used && typeof r.moves_used === 'object') ? r.moves_used : {};
+    guard += Math.max(0, parseInt(mv.guard, 10) || 0);
+    attack += Math.max(0, parseInt(mv.attack, 10) || 0);
+    dash += Math.max(0, parseInt(mv.dash, 10) || 0);
+    dodges += Math.max(0, parseInt(r.dodges_landed, 10) || 0);
+    const secs = num(r.fight_secs);
+    if (secs > 0) { totalSecs += secs; const st = num(r.still_secs); if (st > 0) stillSecs += st; }
+    if (Array.isArray(r.potion_hp_fracs) && r.potion_hp_fracs.length) {
+      for (const v of r.potion_hp_fracs) { const f = Number(v); if (isFinite(f) && f >= 0 && f <= 1) { fracSum += f; fracN++; } }
+    } else {
+      const mean = Number(r.potion_hp_mean), n = Math.max(0, parseInt(r.potion_n ?? mv.potion, 10) || 0);
+      if (isFinite(mean) && n > 0) { fracSum += clamp(mean, 0, 1) * n; fracN += n; }
+    }
+    if (Array.isArray(r.attack_ranges) && r.attack_ranges.length) {
+      for (const v of r.attack_ranges) { const d = Number(v); if (isFinite(d) && d >= 0) { rangeSum += d; rangeN++; } }
+    } else {
+      const mean = Number(r.attack_range_mean), n = Math.max(0, parseInt(r.attack_n, 10) || 0);
+      if (isFinite(mean) && mean >= 0 && n > 0) { rangeSum += mean * n; rangeN += n; }
+    }
+    const oc = String(r.outcome || '').toLowerCase();
+    if (oc === 'kill') kills++; else if (oc === 'death') deaths++;
+    const cause = String(r.last_damage_source || '').trim().toLowerCase();
+    if (cause) causes[cause] = (causes[cause] || 0) + 1;
+    const op = normOpener(r.opener);
+    openers[op] = (openers[op] || 0) + 1;
+  }
+  const defensive = guard + Math.min(dash, dodges), combat = guard + attack + dash;
+  const turtle = combat > 0 ? clamp(defensive / combat, 0, 1) : 0;
+  let spam = 0;
+  if (dash > 0) {
+    const dpm = totalSecs > 0 ? dash / (totalSecs / 60) : 12;
+    spam = clamp(Math.min(1, dpm / 12) * (1 - clamp(dodges / dash, 0, 1)), 0, 1);
+  }
+  const still = totalSecs > 0 ? clamp(stillSecs / totalSecs, 0, 1) : 0;
+  const potion = fracN > 0 ? clamp(fracSum / fracN, 0, 1) : 0;
+  const range = rangeN > 0 ? clamp((rangeSum / rangeN) / 300, 0, 1) : 0;
+  let opener = 'still';
+  const oks = Object.keys(openers);
+  if (oks.length) { const top = Math.max(...oks.map((k) => openers[k])); opener = oks.filter((k) => openers[k] === top).sort()[0]; }
+  const decisive = kills + deaths;
+  const finish = decisive > 0 ? clamp(kills / decisive, 0, 1) : 0;
+  const totalCauses = Object.values(causes).reduce((s, n) => s + n, 0);
+  const deathCauses = {}, deathCounts = {};
+  for (const k of Object.keys(causes).sort()) {
+    deathCounts[k] = causes[k];
+    deathCauses[k] = totalCauses ? causes[k] / totalCauses : 0;
+  }
+  const lines = {
+    turtle_ratio: turtle >= 0.6 ? 'turtles when hurt' : turtle >= 0.35 ? 'holds guard often' : 'rarely turtles',
+    dash_spam: spam >= 0.6 ? 'spams dash' : spam >= 0.3 ? 'dashes often' : 'dashes with purpose',
+    stationary_ratio: still >= 0.6 ? 'stands still to trade' : still >= 0.35 ? 'holds ground often' : 'keeps moving',
+    potion_timing: fracN <= 0 ? 'rarely drinks' : potion >= 0.7 ? 'drinks potions early' : potion >= 0.4 ? 'drinks mid-fight' : 'drinks at death\'s door',
+    attack_range_pref: rangeN <= 0 ? 'no clean hits yet' : range >= 0.66 ? 'hits from long range' : range >= 0.33 ? 'mixes its range' : 'fights point-blank',
+    opener: { attack: 'opens with attacks', dash: 'opens with a dash', potion: 'opens with a potion', guard: 'opens with guard', still: 'waits at the bell' }[opener] || 'waits at the bell',
+    finish_frac: finish <= 0 ? 'no kills yet' : finish >= 0.6 ? 'usually finishes fights' : finish >= 0.35 ? 'trades kills' : 'rarely finishes fights',
+    death_causes: totalCauses <= 0 ? 'nothing has put it down yet'
+      : 'often put down by ' + Object.keys(causes).filter((k) => causes[k] === Math.max(...Object.values(causes))).sort()[0].slice(0, 40),
+  };
+  const keys = ['turtle_ratio', 'dash_spam', 'stationary_ratio', 'potion_timing', 'attack_range_pref', 'opener', 'finish_frac', 'death_causes'];
+  return {
+    counters: { turtle_ratio: turtle, dash_spam: spam, stationary_ratio: still, potion_timing: potion, attack_range_pref: range, finish_frac: finish },
+    opener, death_causes: deathCauses, death_counts: deathCounts,
+    lines, labels: list.length ? keys.map((k) => lines[k]) : [], fights: list.length,
+  };
+}
+function normOpener(raw) {
+  const o = String(raw || '').trim().toLowerCase();
+  if (o === 'atk' || o === 'special' || o === 'attack') return 'attack';
+  if (o === 'dash' || o === 'potion' || o === 'guard') return o;
+  return 'still';
+}
+/* Deterministic habit-derived read for when the model returns nothing —
+ * the death screen and descent cards never render a blank gap. */
+function fallbackRead(summary) {
+  if (!summary || !(summary.fights > 0)) return 'it has no read on you yet — move, and it will learn.';
+  const c = summary.counters || {}, L = summary.lines || {};
+  const scored = [
+    [Number(c.turtle_ratio) || 0, L.turtle_ratio || ''],
+    [Number(c.dash_spam) || 0, L.dash_spam || ''],
+    [Number(c.stationary_ratio) || 0, L.stationary_ratio || ''],
+  ].filter(([v, s]) => v >= 0.35 && s).sort((a, b) => b[0] - a[0]);
+  const read = scored.length ? scored.slice(0, 2).map(([, s]) => s).join('; ') : (L.opener || 'it watches how you open');
+  return (read || 'it watches how you open.').slice(0, 200);
+}
+function loadHabitProfile() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LS_HABITS) || 'null');
+    if (v && v.counters && typeof v.counters === 'object') return v;
+  } catch { /* corrupted profile: recompute from history at run start */ }
+  return null;
+}
+function saveHabitProfile() {
+  if (!F) return;
+  try {
+    const s = summarizeHistory(F.runHistory);
+    F.habitProfile = { counters: s.counters, lines: s.lines, labels: s.labels, fights: s.fights };
+    localStorage.setItem(LS_HABITS, JSON.stringify({ ...F.habitProfile, updatedAt: Date.now() }));
+  } catch { /* run survives */ }
+}
+/* One builder for the attempt-log record both kill and death share, so the
+ * habit counters read the same shape either way. */
+function openerFrom(acts) {
+  if (!acts || !acts.length) return 'still';
+  const counts = {};
+  for (const a of acts) { const k = normOpener(a); counts[k] = (counts[k] || 0) + 1; }
+  const top = Math.max(...Object.values(counts));
+  return Object.keys(counts).filter((k) => counts[k] === top).sort()[0];
+}
+function resetFightTrackers() {
+  if (!F) return;
+  F.moves = { dash: 0, attack: 0, guard: 0, potion: 0 }; // no guard mechanic: guard stays 0 by construction
+  F.dodges = 0; F.stillSecs = 0; F.potionFracs = []; F.attackDists = []; F.openerActs = [];
+}
+function fightRecord(outcome, hpEnd) {
+  const mv = (F.moves && typeof F.moves === 'object') ? F.moves : {};
+  const pf = F.potionFracs || [], ad = F.attackDists || [];
+  return {
+    descent: F.stats.descent, form: F.boss.form, outcome,
+    fight_secs: Math.round(((performance.now() - F.fightT0) / 1000) * 10) / 10,
+    hp_at_start: Math.round(F.fightHpStart), hp_at_end: hpEnd,
+    last_damage_source: F.lastDamageSource || (F.events.length ? F.events[F.events.length - 1] : ''),
+    damage_dealt: Math.round(F.damageDealt || 0),
+    moves_used: { dash: mv.dash || 0, attack: mv.attack || 0, guard: 0, potion: mv.potion || 0 },
+    damage_blocked: 0, // no block mechanic: nothing ever blocks (schema kept so the counter reads it)
+    dodges_landed: F.dodges || 0,
+    still_secs: Math.round((F.stillSecs || 0) * 10) / 10,
+    potion_hp_mean: pf.length ? Math.round((pf.reduce((s, v) => s + v, 0) / pf.length) * 100) / 100 : 0,
+    potion_n: pf.length,
+    attack_range_mean: ad.length ? Math.round((ad.reduce((s, v) => s + v, 0) / ad.length) * 10) / 10 : 0,
+    attack_n: ad.length,
+    opener: openerFrom(F.openerActs),
+  };
 }
 const KEYMAP = [
   ['Move', 'WASD / arrows / left stick'],
@@ -330,7 +480,7 @@ function showEnd(r) {
   $('end-build').textContent = build.length
     ? 'Final build (Lv ' + F.stats.level + '): ' + build.join(' · ')
     : 'No cards taken. The dark keeps the deposit.';
-  $('end-read').textContent = F.lastRead ? '\u201CIts read on you: ' + F.lastRead + '\u201D' : '';
+  $('end-read').textContent = '\u201CIts read on you: ' + (F.lastRead || fallbackRead(F.habitProfile)) + '\u201D';
   const best = loadBest();
   $('end-ladder').textContent = 'Best descent ' + Math.max(best, F.stats.descent) + '. One life. No win. Descend again.';
   $('btn-rematch').textContent = 'DESCEND AGAIN';
@@ -362,6 +512,7 @@ function startFight() {
     stats: defaultStats(),
     build: [], // card names taken this run — reset every run, shown on death
     runHistory: loadHistory(), // attempt log: persists across runs, ≤60
+    habitProfile: null, // seeded just below: persisted profile or live summary (needs F.runHistory first)
     boss: { form: cfg.id, hp: bossHpPool(cfg, 1), maxHp: bossHpPool(cfg, 1) },
     bossDmgMul: bossDmgMul(1), bossMovePxS: bossMovePxS(cfg, 1),
     tacticWeights: null, lastNextForm: null, lastTaunt: '', lastRead: '',
@@ -384,6 +535,12 @@ function startFight() {
   };
   /* F.maxHp aliases F.boss.maxHp so a form transform has one live pool to reset. */
   const selfF = F;
+  /* THE FEATURE — the boss is immortal, so its memory outlives your run:
+   * the persisted habit profile (written on every kill and death) seeds the
+   * first brain call, so run 2 opens already countering run 1's habits.
+   * Falls back to summarising history live (fresh device / older client). */
+  F.habitProfile = loadHabitProfile() || summarizeHistory(F.runHistory);
+  resetFightTrackers(); // per-fight habit trackers start clean every run
   Object.defineProperty(F, 'maxHp', {
     get() { return selfF.boss.maxHp; },
     set(v) { selfF.boss.maxHp = v; },
@@ -438,7 +595,8 @@ function doTransform(newForm, isMidFight, read) {
   setVignette(false);
   setBossChrome(def);
   const sig = def.attacks.find((a) => a.id === def.signature) || def.attacks[0];
-  const sub = (read ? '\u201CIts read on you: ' + read + '\u201D — ' : '') + def.title;
+  const effRead = read || fallbackRead(F.habitProfile); // an empty model read never renders blank
+  const sub = '\u201CIts read on you: ' + effRead + '\u201D — ' + def.title;
   showBanner((isMidFight ? 'IT BECOMES — ' : 'DESCENT ' + F.stats.descent + ' — ') + def.name.toUpperCase(),
     'NEW MOVE: ' + sig.id.toUpperCase() + ' — ' + (sig.telegraph_ms / 1000).toFixed(2) + 's WINDUP',
     sub, css(def.colour));
@@ -480,12 +638,14 @@ function tryAttack(special) {
     F.atkT = now;
   }
   logHist('atk');
+  if (F.moves) F.moves.attack++; // habit hook: swing counted, distance only on a hit below
   $('hint-bar').classList.remove('show');
   const range = special ? S.specialRange : S.atkRange;
   const dmg = special ? S.specialDmg : S.damage;
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
   const reach = range + 1.1;
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
+    (F.attackDists = F.attackDists || []).push(Math.round((dist2(F.px, F.pz, F.bx, F.bz) / PX) * 10) / 10); // habit hook: hit distance in px
     const eff = Math.max(1, dmg - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
     F.boss.hp -= eff;
     F.damageDealt = (F.damageDealt || 0) + eff; // the attempt log's damage_dealt
@@ -518,6 +678,7 @@ function tryDash() {
   } else { const m = Math.hypot(dx, dz); dx /= m; dz /= m; }
   F.dashDx = dx; F.dashDz = dz;
   logHist('dash');
+  if (F.moves) F.moves.dash++; // habit hook: dash counted (dodges counted on i-frame save in hurtPlayer)
   F.events.push('player dashed');
   arena.burst(F.px, F.pz, 0x9cc8ff, 6, 2.5);
   arena.dust(F.px, F.pz, 5);
@@ -529,6 +690,9 @@ function tryPotion() {
   const S = F.stats;
   if (S.potionsLeft <= 0 || S.hp >= S.maxHp) return;
   S.potionsLeft--;
+  (F.potionFracs = F.potionFracs || []).push(S.maxHp > 0 ? clamp(S.hp / S.maxHp, 0, 1) : 0); // habit hook: HP fraction at drink time
+  if (F.moves) F.moves.potion++; // habit hook
+  logHist('potion'); // opener hook: a first-3s potion counts as the opener
   const heal = Math.round(potionHealFor(S.maxHp)); // 30 + 3% max HP: flat heals go dead ~descent 27
   S.hp = Math.min(S.maxHp, S.hp + heal);
   refreshPotions();
@@ -541,6 +705,7 @@ function hurtPlayer(dmg, why) {
   if (!F || F.over || F.paused) return; // paused: no HP mutation
   const now = performance.now() / 1000;
   if (now < F.ifrT) { // i-frames save you
+    F.dodges = (F.dodges || 0) + (dmg > 0 ? 1 : 0); // habit hook: an i-frame save is an effective (defensive) dash
     if (dmg > 0) spawnPop(F.px, 1.8, F.pz, 'TOO SLOW!', 'heal');
     return;
   }
@@ -560,7 +725,11 @@ function hurtPlayer(dmg, why) {
 
 function logHist(kind) {
   if (!F) return;
-  F.hist.push({ t: performance.now() / 1000, kind });
+  const t = performance.now() / 1000;
+  F.hist.push({ t, kind });
+  // opener hook (smallest one: a timestamp check): actions in the first 3s of
+  // the fight seed the opener counter. Guard kind never fires (no guard input).
+  if (F.fightT0 && performance.now() - F.fightT0 < 3000) (F.openerActs = F.openerActs || []).push(kind);
 }
 
 /* ---------- brain ---------- */
@@ -568,6 +737,13 @@ function logHist(kind) {
  * stillness vs motion, swing rate, dash rate. The model reads these. */
 function habits() {
   if (!F) return {};
+  // No data yet: the floor, never spawn-turtle. (moved10 starts at 0, which
+  // the old formula read as "never moved" -> turtle 1 on the very first tick,
+  // punishing new players for having no history. A fresh run sends zeros until
+  // the fight has 3s of behaviour behind it.)
+  if (!F.fightT0 || performance.now() - F.fightT0 < 3000) {
+    return { turtle_ratio: 0, stationary_ratio: 0, aggression: 0, dash_spam: 0 };
+  }
   const now = performance.now() / 1000;
   F.hist = F.hist.filter((h) => now - h.t < 10);
   let atk = 0, dash = 0;
@@ -587,14 +763,31 @@ function think(first) {
   const phase = bossPct < 30 ? 'enrage' : 'normal';
   if (phase === 'enrage' && !self.enraged) enterEnrage();
   const seq = self.tick++;
+  /* Habits sent = the immortal profile (cross-run memory, seeded from
+   * localStorage on run start) merged with the live 10s window: long-term
+   * counters persist, live spikes react. Summary LINES go in history so the
+   * prompt stays small (~250 tokens); raw floats never do. */
+  const live = habits();
+  const prof = (self.habitProfile && self.habitProfile.counters) || {};
+  const num = (v) => { const n = Number(v); return isFinite(n) && n > 0 ? n : 0; };
+  const mergedHabits = {
+    turtle_ratio: Math.max(num(prof.turtle_ratio), num(live.turtle_ratio)),
+    dash_spam: Math.max(num(prof.dash_spam), num(live.dash_spam)),
+    stationary_ratio: Math.max(num(prof.stationary_ratio), num(live.stationary_ratio)),
+    potion_timing: num(prof.potion_timing),
+    attack_range_pref: num(prof.attack_range_pref),
+    finish_frac: num(prof.finish_frac),
+    aggression: num(live.aggression), // live-only: current-fight rush the profile cannot know yet
+  };
+  const habitLines = (self.habitProfile && self.habitProfile.labels) || [];
   const body = {
     boss_id: self.bossId, tick: seq, seq,
     descent: self.stats.descent, form: self.boss.form,
     boss_hp_pct: Math.round(bossPct), player_hp_pct: Math.round(Math.max(0, self.stats.hp)),
-    habits: habits(), build: (self.build || []).slice(),
+    habits: mergedHabits, build: (self.build || []).slice(),
     fight_secs: (performance.now() - self.startT) / 1000,
     last_damage_source: self.events.length ? self.events[self.events.length - 1] : '',
-    history: self.events.slice(-4),
+    history: habitLines.concat(self.events.slice(-4)).slice(-12),
     transforms_this_fight: self.transformedThisFight ? 1 : 0,
     secs_since_transform: now - (self.lastTransformT || -99),
   };
@@ -815,6 +1008,8 @@ function update(dt) {
       F.pz += mz * c * sp * dt;
       F.moved10 += Math.hypot(mx * c, mz * c) * sp * dt;
       F.facing = Math.atan2(mx * c, mz * c);
+    } else {
+      F.stillSecs = (F.stillSecs || 0) + dt; // habit hook: time spent not moving feeds stationary_ratio
     }
   }
   F.movedDecay += dt;
@@ -934,16 +1129,12 @@ function killBoss() {
   // HOOK(arena-impact): the fall wants a crack ring + pooling blood here —
   // a later lane's job. arena.spawnCrack / the blood-decal path own it.
   arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
-  // 2. Attempt log.
+  // 2. Attempt log (full habit shape) + the immortal write: the profile is
+  // re-derived and persisted here, so it survives the run that just ended.
   const fightSecs = (performance.now() - F.fightT0) / 1000;
   const hpPctLeft = clamp(F.stats.hp / F.stats.maxHp * 100, 0, 100);
-  pushHistory({
-    descent: F.stats.descent, form: F.boss.form, outcome: 'kill',
-    fight_secs: Math.round(fightSecs * 10) / 10,
-    hp_at_start: Math.round(F.fightHpStart), hp_at_end: Math.max(0, Math.round(F.stats.hp)),
-    last_damage_source: F.lastDamageSource || (F.events.length ? F.events[F.events.length - 1] : ''),
-    damage_dealt: Math.round(F.damageDealt || 0),
-  });
+  pushHistory(fightRecord('kill', Math.max(0, Math.round(F.stats.hp))));
+  saveHabitProfile();
   grantKillXp(fightSecs);
   // 3. Governor: clean + fast climbs, scrappy wins still advance.
   const dNext = F.stats.descent + descentGain(fightSecs, hpPctLeft, F.stats.descent);
@@ -963,6 +1154,7 @@ function killBoss() {
     F.fightT0 = performance.now();
     F.damageDealt = 0; F.lastDamageSource = '';
     F.transformedThisFight = false;
+    resetFightTrackers(); // next fight's habit counters start clean (history keeps the old ones)
     const returnForm = F.pendingNextForm || F.lastNextForm || F.boss.form;
     F.pendingNextForm = null;
     resetEnrage();
@@ -974,7 +1166,8 @@ function killBoss() {
       F.bossDmgMul = bossDmgMul(dNext);
       F.bossMovePxS = bossMovePxS(F.cfg, dNext);
       arena.burst(F.bx, F.bz, 0xffe9a8, 10, 4, 1.0 + F.flyY);
-      const sub = (F.lastRead ? '\u201CIts read on you: ' + F.lastRead + '\u201D — ' : '') + 'same body. hungrier.';
+      const sameRead = F.lastRead || fallbackRead(F.habitProfile); // never a mystery, never blank
+      const sub = '\u201CIts read on you: ' + sameRead + '\u201D — ' + 'same body. hungrier.';
       showBanner('DESCENT ' + dNext, F.cfg.name.toUpperCase() + ' GETS UP', sub, css(F.cfg.colour));
     }
     F.transitioning = false;
@@ -1168,14 +1361,11 @@ function finish(won) {
   F.over = true;
   F.won = won;
   if (!won) {
-    // Death ends the run: log the final fight, bank the deepest descent.
-    pushHistory({
-      descent: F.stats.descent, form: F.boss.form, outcome: 'death',
-      fight_secs: Math.round(((performance.now() - F.fightT0) / 1000) * 10) / 10,
-      hp_at_start: Math.round(F.fightHpStart), hp_at_end: 0,
-      last_damage_source: F.lastDamageSource || (F.events.length ? F.events[F.events.length - 1] : ''),
-      damage_dealt: Math.round(F.damageDealt || 0),
-    });
+    // Death ends the run: log the final fight (full habit shape), bank the
+    // deepest descent, and persist the profile — this write is what the next
+    // run's first brain call reads.
+    pushHistory(fightRecord('death', 0));
+    saveHabitProfile();
     saveBest(Math.max(loadBest(), F.stats.descent));
   }
   setVignette(false);

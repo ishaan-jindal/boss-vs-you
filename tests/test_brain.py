@@ -295,6 +295,126 @@ def test_health_fast():
     assert dt < 1.0
 
 
+def test_habit_profile_changes_stub_tactic_distribution():
+    # Load-bearing proof: the same stub over two habit profiles must play
+    # differently. Sampling runs through the Python mirror of the client's
+    # weighted tactic sampler (the client uses Math.random, which cannot be
+    # seeded, so determinism lives here).
+    from bossfight.habits import (
+        counters_for_server,
+        habit_summary,
+        tactic_distribution,
+    )
+
+    def profile(**kw):
+        base = dict(
+            descent=1,
+            form="crawler",
+            outcome="kill",
+            fight_secs=60.0,
+            hp_at_start=100,
+            hp_at_end=50,
+            last_damage_source="lunge",
+            damage_dealt=140,
+            damage_blocked=0,
+            dodges_landed=1,
+        )
+        base.update(kw)
+        return base
+
+    turtle_hist = [
+        profile(
+            moves_used={"dash": 1, "attack": 2, "guard": 15, "potion": 0},
+            dodges_landed=1,
+            damage_blocked=20,
+            still_secs=40,
+            outcome="death",
+            last_damage_source="slam",
+        )
+        for _ in range(3)
+    ]
+    aggro_hist = [
+        profile(
+            moves_used={"dash": 14, "attack": 25, "guard": 0, "potion": 0},
+            dodges_landed=1,
+            still_secs=5,
+        )
+        for _ in range(3)
+    ]
+    turtle_w = stub_decide(
+        req(habits=counters_for_server(habit_summary(turtle_hist)))
+    ).tactics
+    aggro_w = stub_decide(
+        req(habits=counters_for_server(habit_summary(aggro_hist)))
+    ).tactics
+    dt = tactic_distribution(turtle_w, n=200, seed=0)
+    da = tactic_distribution(aggro_w, n=200, seed=0)
+    assert dt != da  # not a constant: the profile moves the distribution
+    assert dt["bait"] > dt["pressure"]  # turtle draws bait-heavy play
+    assert da["pressure"] > da["bait"]  # heat draws pressure-heavy play
+
+
+def test_empty_habits_yield_the_floor():
+    # A new player (no history) must not be punished: empty habits hold the
+    # current body with balanced weights instead of a specialised counter.
+    from bossfight.habits import counters_for_server, habit_summary
+
+    assert counters_for_server(habit_summary([])) == {
+        "turtle_ratio": 0.0,
+        "dash_spam": 0.0,
+        "stationary_ratio": 0.0,
+        "potion_timing": 0.0,
+        "attack_range_pref": 0.0,
+        "finish_frac": 0.0,
+    }
+    out = stub_decide(req(habits={}))
+    assert out.tactics == {"pressure": 0.4, "bait": 0.3, "bombs": 0.3}
+    assert out.next_form == "crawler"  # holds the body it wears
+
+
+def test_rich_habits_end_to_end_with_read():
+    # Full shape: a habit-rich payload returns a legal reply with read populated.
+    from bossfight.habits import counters_for_server, habit_summary
+
+    summary = habit_summary(
+        [
+            {
+                "descent": 2,
+                "form": "crawler",
+                "outcome": "death",
+                "fight_secs": 75.0,
+                "hp_at_start": 100,
+                "hp_at_end": 0,
+                "last_damage_source": "slam",
+                "damage_dealt": 120,
+                "moves_used": {"dash": 2, "attack": 8, "guard": 12, "potion": 1},
+                "damage_blocked": 15,
+                "dodges_landed": 2,
+                "still_secs": 45.0,
+                "potion_hp_mean": 0.3,
+                "potion_n": 1,
+                "attack_range_mean": 90.0,
+                "attack_n": 8,
+                "opener": "guard",
+            },
+        ]
+    )
+    payload = req(
+        habits=counters_for_server(summary),
+        history=summary["labels"],
+        last_damage_source="slam",
+        fight_secs=75.0,
+    ).model_dump()
+    client = TestClient(create_app())
+    r = client.post("/api/brain", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tactics"] and all(v >= 0 for v in body["tactics"].values())
+    assert body["next_form"] in bosses.FORMS
+    assert body["read"] and len(body["read"]) <= 200
+    assert is_taunt_clean(body["taunt"])
+
+
 def test_score_formula():
     # base + time bonus + hp bonus, stated plainly. One boss, one base.
     assert score_for(bosses.BOSS_ID, 240, 0) == 1500
