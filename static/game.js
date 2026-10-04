@@ -107,6 +107,8 @@ const BOUND_HERO_M = 0.7; // half-sprite margin: hero edge, not center, hits the
 const BOUND_BOSS_M = 1.0; // half-sprite margin: boss body is wider than hero
 const BOUND_MINION_M = 0.7; // half-sprite margin: adds share hero size
 const BOUND_PROJ_M = 0.5; // projectiles die at wall face, never fly into the wings
+const HERO_SPECIAL_PROJ_SPEED = 340 * PX; // hero special bolt outruns boss lobs (260*PX) so the trade-up reads
+const POTIONS_AT_ENTRY = 2; // every room entry resets to 2: attrition across rooms, never a stockpile
 const FLOOR_Z_MIN = -5.14; // w2s y=168+z*10.5 hits floor-top 114px here: z below is back-wall UI strip
 /* Clamp a ground entity into the playable rect; smallest-penetration first so
  * corners slide instead of sticking (fixing one axis is the minimal push). */
@@ -708,6 +710,7 @@ function startFight() {
   for (const wl of F.walls) arena.killWall(wl.id);
   F.projectiles = []; F.walls = [];
   seedRoom(1); // descent 1 pillars; boss pool already scaled by roomMult above
+  F.stats.potionsLeft = POTIONS_AT_ENTRY; // room entry resets to exactly 2
   if (prev && prev.minions) for (const m of prev.minions) { try { arena.killProjectile('mx' + m.id); } catch { /* visual only */ } }
   setVignette(false);
   setBossChrome(cfg);
@@ -797,9 +800,18 @@ function tryAttack(special) {
   logHist('atk');
   if (F.moves) F.moves.attack++; // habit hook: swing counted, distance only on a hit below
   $('hint-bar').classList.remove('show');
-  const range = special ? S.specialRange : S.atkRange;
-  const dmg = special ? S.specialDmg : S.damage;
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
+  if (special) {
+    const dx = F.bx - F.px, dz = F.bz - F.pz;
+    const m = Math.hypot(dx, dz) || 1;
+    const id = 'h' + (F.projSeq++);
+    F.projectiles.push({ id, hero: true, x: F.px, z: F.pz, vx: (dx / m) * HERO_SPECIAL_PROJ_SPEED, vz: (dz / m) * HERO_SPECIAL_PROJ_SPEED, dmg: S.specialDmg, life: 2.5 });
+    arena.spawnProjectile(id, F.px, F.pz);
+    arena.burst(F.px, F.pz, 0xffd75e, 6, 3);
+    return;
+  }
+  const range = S.atkRange;
+  const dmg = S.damage;
   const reach = range + 1.1;
   const vuln = performance.now() / 1000 < (F.slumpUntil || 0) ? (F.vulnMult || 1.5) : 1; // slump: the punish window pays 1.5x
   let hitAny = false;
@@ -809,18 +821,17 @@ function tryAttack(special) {
     const eff = Math.max(1, Math.round(dmg * vuln) - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
     F.boss.hp -= eff;
     F.damageDealt = (F.damageDealt || 0) + eff; // the attempt log's damage_dealt
-    F.events.push(special ? 'boss hit by special' : 'boss hit');
-    hitstop(special ? 0.09 : 0.05);
-    arena.burst(F.bx, F.bz, special ? 0xffd75e : 0xffffff, special ? 14 : 9, 4.5, 1.0 + F.flyY);
-    arena.dust(F.bx, F.bz, special ? 12 : 7);
-    if (special) arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.0);
-    spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'WHAM! -' : 'THWACK! -') + eff, special ? 'special' : 'hit');
-    if (!REDUCED) arena.shake(special ? 0.6 : 0.35);
+    F.events.push('boss hit');
+    hitstop(0.05);
+    arena.burst(F.bx, F.bz, 0xffffff, 9, 4.5, 1.0 + F.flyY);
+    arena.dust(F.bx, F.bz, 7);
+    spawnPop(F.bx, 2.1 + F.flyY, F.bz, 'THWACK! -' + eff, 'hit');
+    if (!REDUCED) arena.shake(0.35);
     else domFlash();
   }
   for (let i = (F.minions || []).length - 1; i >= 0; i--) { // swings catch adds too
     const m = F.minions[i];
-    if (dist2(F.px, F.pz, m.x, m.z) <= reach) { hitAny = true; hitMinion(m, dmg, special); }
+    if (dist2(F.px, F.pz, m.x, m.z) <= reach) { hitAny = true; hitMinion(m, dmg, false); }
   }
   if (!hitAny) {
     spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss');
@@ -1305,7 +1316,29 @@ function update(dt) {
     const pr = F.projectiles[i];
     pr.x += pr.vx * dt; pr.z += pr.vz * dt; pr.life -= dt;
     arena.moveProjectile(pr.id, pr.x, pr.z);
-    if (dist2(F.px, F.pz, pr.x, pr.z) < 0.75) { hurtPlayer(pr.dmg, pr.why || 'fireball'); pr.life = 0; }
+    if (pr.hero) {
+      let spent = false;
+      if (F.boss.hp > 0 && dist2(F.bx, F.bz, pr.x, pr.z) < 0.75) {
+        const vuln = performance.now() / 1000 < (F.slumpUntil || 0) ? (F.vulnMult || 1.5) : 1; // slump pays 1.5x, same as swings
+        const eff = Math.max(1, Math.round(pr.dmg * vuln) - (F.cfg.armour || 0)); // colossus plating taxes bolts too
+        F.boss.hp -= eff;
+        F.damageDealt = (F.damageDealt || 0) + eff;
+        F.events.push('boss hit by special');
+        hitstop(0.09);
+        arena.burst(F.bx, F.bz, 0xffd75e, 14, 4.5, 1.0 + F.flyY);
+        arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.0);
+        spawnPop(F.bx, 2.1 + F.flyY, F.bz, 'WHAM! -' + eff, 'special');
+        if (!REDUCED) arena.shake(0.6);
+        else domFlash();
+        spent = true;
+      } else {
+        for (let j = (F.minions || []).length - 1; j >= 0; j--) {
+          const m = F.minions[j];
+          if (dist2(m.x, m.z, pr.x, pr.z) < 0.75) { hitMinion(m, pr.dmg, true); spent = true; break; }
+        }
+      }
+      if (spent) pr.life = 0; // hero bolts die on the first boss/minion hit
+    } else if (dist2(F.px, F.pz, pr.x, pr.z) < 0.75) { hurtPlayer(pr.dmg, pr.why || 'fireball'); pr.life = 0; }
     const pMinZ = Math.max(-H + BOUND_PROJ_M, FLOOR_Z_MIN);
     if (pr.life <= 0 || pr.x < -W + BOUND_PROJ_M || pr.x > W - BOUND_PROJ_M || pr.z < pMinZ || pr.z > H - BOUND_PROJ_M) {
       arena.killProjectile(pr.id);
@@ -1456,6 +1489,7 @@ function killBoss() {
     F.transitioning = false;
     setPaused(false); // resume into the descent card
     seedRoom(dNext); // new depth, new pillars; adds start at 0 by construction (room was cleared)
+    F.stats.potionsLeft = POTIONS_AT_ENTRY; // room entry resets to exactly 2
     think(); // load-bearing decisions move to the between-fight window
   });
 }
