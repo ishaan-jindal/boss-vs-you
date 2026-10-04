@@ -46,6 +46,12 @@ class BrainFields(BaseModel):
     taunt: str = Field(max_length=140)
     read: str = Field(default="", max_length=200)
     intensity: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Room-clear orders (optional, additive): spawn one add, how urgently,
+    # which attack to open with. Absent → treated as no spawn call.
+    spawn_call: bool = False
+    minion_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    attack_id: str | None = None
+    minions_alive: int = 0
 
 
 def keys() -> tuple[str | None, str | None]:

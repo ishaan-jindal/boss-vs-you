@@ -225,6 +225,40 @@ def ttk_seconds(descent: int, build: list[str]) -> float:
     return boss_hp(descent) / player_dps(build, descent)
 
 
+# --- Room-clear adds (small room + minions compensate the boss) ---
+# Minion base HP mirrors bosses.MINIONS so there is one copy of each
+# number here for the curve and one in bosses.py for the roster; the
+# fns below are the server-side source the tests pin down.
+MINION_BASE_HP: dict[str, float] = {"chaser": 20.0, "lobber": 14.0}
+MINION_BASE_EXP: dict[str, int] = {"chaser": 8, "lobber": 10}
+
+
+def minion_exp(kind: str) -> int:
+    """XP for one minion kill. Flat per kind (a fraction of the ~100 XP
+    level threshold, so farming adds never replaces killing the boss)."""
+    return MINION_BASE_EXP.get(kind, 0)
+
+
+def minion_hp(kind: str, descent: int) -> float:
+    """Minion HP scales additively like the boss (+5%/level), so adds stay
+    relevant without hard-walling zero-DPS builds. Unknown kinds score 0."""
+    base = MINION_BASE_HP.get(kind)
+    if base is None:
+        return 0.0
+    return base * (1.0 + BOSS_HP_GROWTH_PER_LEVEL * max(0, descent))
+
+
+def room_boss_hp_mult(descent: int) -> float:
+    """Boss HP multiplier for minion rooms. Flat 0.75: the small room +
+    adds already tax dodging, so the boss sheds ~25% HP to hold the ~2-3
+    min TTK band. Flat, not descent-scaled, so the crossover tripwire
+    below cannot drift with depth."""
+    _ = max(0, descent)
+    # ponytail: flat 0.75 ceiling; per-descent ramp if deep rooms ever
+    # feel empty once player DPS outscales adds.
+    return 0.75
+
+
 def balance_summary() -> dict:
     """Exact payload served at GET /api/balance (forms merged in by app)."""
     return {

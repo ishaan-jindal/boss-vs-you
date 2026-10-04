@@ -123,6 +123,9 @@ def _atk(
     cooldown_s: float,
     range_px: int,
     pattern: str,
+    windup_ms: int = 300,
+    slump_s: float = 1.5,
+    vuln_mult: float = 1.5,
     **extra,
 ) -> dict:
     a = {
@@ -132,9 +135,51 @@ def _atk(
         "cooldown_s": cooldown_s,
         "range_px": range_px,
         "pattern": pattern,
+        # Room-clear telegraph: windup flashes the tell, slump is the
+        # punish window (boss takes vuln_mult damage). Defaults match the
+        # old readable ~0.8s disengage rhythm; per-attack overrides only
+        # where a signature needs it (feint stays short/unreadable).
+        # ponytail: flat per-attack numbers, per-descent scaling if tells
+        # ever need to quicken with depth.
+        "windup_ms": windup_ms,
+        "slump_s": slump_s,
+        "vuln_mult": vuln_mult,
     }
     a.update(extra)
     return a
+
+
+# Room-clear adds: two minion kinds, plain dicts like FORMS. Chaser is the
+# fast melee tax (forces movement), lobber is the slow ranged tax (forces
+# positioning). HP/damage sit well below boss attacks (8-16) so adds
+# pressure without out-damaging the boss; xp_value is a small fraction of
+# the ~100 XP level threshold so farming adds never replaces the boss.
+# ponytail: fixed two-kind roster, data-driven table if more kinds arrive.
+MINIONS: dict[str, dict] = {
+    "chaser": {
+        "id": "chaser",
+        "name": "Skitter",
+        "hp": 20,
+        "move_speed": 170,
+        "damage": 5,
+        "xp_value": 8,
+        "palette": {"body": 0x2B2440, "eye": 0xCBB7FF},
+    },
+    "lobber": {
+        "id": "lobber",
+        "name": "Spitter",
+        "hp": 14,
+        "move_speed": 90,
+        "damage": 6,
+        "xp_value": 10,
+        "palette": {"body": 0x3D4A5C, "eye": 0xE8FBFF},
+    },
+}
+
+# Hard cap on live adds: bounds per-tick damage budget and DOM/sprite
+# count in a small room. 5 keeps adds readable, never a swarm.
+# ponytail: global cap, per-kind caps if one kind ever dominates.
+MINION_CAP = 5
 
 
 FORM_DEFS: dict[str, dict] = {

@@ -33,6 +33,13 @@ class BrainRequest(BaseModel):
     # count because only it knows its fight in real time.
     transforms_this_fight: int = 0
     secs_since_transform: float = 1e9
+    # Room-clear state (all optional, additive): how many adds are live,
+    # and which attack the client is currently showing (lets the model
+    # time spawns to slumps). Unknown/missing → treated as no adds.
+    minions_alive: int = 0
+    spawn_call: bool = False
+    minion_pressure: float = 0.0
+    attack_id: str | None = None
 
 
 class BrainResponse(BaseModel):
@@ -44,6 +51,14 @@ class BrainResponse(BaseModel):
     taunt: str  # <= 140 chars, blocklist-checked
     read: str = ""  # <= 200 chars, the boss's read on the player
     intensity: float = 0.7
+    # Room-clear orders (all optional, additive): spawn_call asks the
+    # client to spawn one add (client clamps to MINION_CAP), pressure
+    # biases how urgently, attack_id names the attack to open with,
+    # minions_alive echoes the request count for debugging.
+    minions_alive: int = 0
+    spawn_call: bool = False
+    minion_pressure: float = 0.0
+    attack_id: str | None = None
 
 
 # Stub taunts for the one immortal boss (all clean, grim dungeon register).
@@ -136,6 +151,12 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
     taunts = STUB_TAUNTS.get(req.boss_id, [DEFAULT_TAUNT])
     taunt = taunts[req.seq % len(taunts)]
     intensity = 0.85 if req.boss_hp_pct < 30 else (0.7 if heat >= 0.5 else 0.55)
+    # Spawn floor: keep ~2 adds live so the room has pressure without
+    # swarming; the client clamps to MINION_CAP regardless. Pressure is a
+    # flat 0.5 (mid) — the stub holds tempo, it never spikes.
+    # ponytail: flat count/pressure ceiling; scale with descent/heat if
+    # rooms ever feel empty at depth.
+    alive = max(0, req.minions_alive)
     return BrainResponse(
         seq=req.seq,
         tactics=tactics,
@@ -145,6 +166,10 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
         taunt=taunt,
         read=read,
         intensity=intensity,
+        minions_alive=alive,
+        spawn_call=alive < 2,
+        minion_pressure=0.5,
+        attack_id=req.attack_id,
     )
 
 
@@ -236,6 +261,10 @@ def _respond(req: BrainRequest, out) -> BrainResponse:
         taunt=out.taunt,
         read=out.read or "",
         intensity=out.intensity,
+        minions_alive=max(0, req.minions_alive),
+        spawn_call=bool(getattr(out, "spawn_call", False)),
+        minion_pressure=_clamp01(getattr(out, "minion_pressure", 0.0) or 0.0),
+        attack_id=getattr(out, "attack_id", None) or req.attack_id,
     )
 
 
