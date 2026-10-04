@@ -60,7 +60,7 @@
  *     one-mid-fight-transform-per-fight rule (see applyBrain).
  */
 import { createArena } from './arena.js';
-import { sfx, toggle as toggleMute, isMuted } from './sfx.js';
+import { sfx, toggle as toggleMute, isMuted, musicStart, musicDuck } from './sfx.js';
 
 /* single immortal boss: forms arrive from /api/bosses, never hardcoded */
 const PX = 1 / 30; // legacy px -> world units (arena ~22 x 16 units)
@@ -569,10 +569,11 @@ function hitstop(sec) {
 function setPaused(v) {
   if (!F || F.paused === v) return;
   const now = performance.now() / 1000;
-  if (v) { F.paused = true; F.pauseT0 = now; return; }
+  if (v) { F.paused = true; F.pauseT0 = now; musicDuck(true); return; }
   /* resume: shift wall-clock timers forward so cooldowns and the clock freeze across the menu */
   const dt = now - (F.pauseT0 || now);
   F.paused = false;
+  musicDuck(false);
   F.atkT += dt; F.specT += dt; F.dashT += dt; F.ifrT += dt; F.lastSwitch += dt;
   if (F.slumpUntil) F.slumpUntil += dt; // the punish window freezes with the world
   if (F.lastBossAtkT) F.lastBossAtkT += dt; // global strike gap freezes too
@@ -586,6 +587,7 @@ function showScreen(name) {
     $('screen-' + s).classList.toggle('active', s === name);
   }
   $('hud').classList.toggle('active', name === 'fight');
+  if (name === 'menu') musicStart('menu');
 }
 
 function spawnPop(x, y, z, text, cls) {
@@ -649,6 +651,7 @@ function showEnd(r) {
   const bb = $('btn-bosses');
   if (bb) { bb.textContent = 'MENU'; bb.onclick = () => { buildMenu(); showScreen('menu'); }; }
   showScreen('end');
+  musicStart('menu');
 
   function statCard(k, v) {
     return '<div class="stat-card"><span class="stat-k">' + k + '</span><span class="stat-v">' + v + '</span></div>';
@@ -724,6 +727,7 @@ function startFight() {
   $('hint-bar').classList.add('show');
   refreshPotions();
   showScreen('fight');
+  musicStart('fight');
   resizeArena();
   /* boss intro splash */
   showBanner('DESCENT 1 — IT WEARS ' + cfg.name.toUpperCase(),
