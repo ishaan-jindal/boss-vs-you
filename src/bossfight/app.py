@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -13,7 +14,9 @@ from . import bosses
 from .balance import balance_summary
 from .brain import BrainRequest, BrainResponse, decide, stub_decide
 
-STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
+STATIC_DIR = Path(
+    os.environ.get("STATIC_DIR") or (Path(__file__).resolve().parents[2] / "static")
+)
 
 
 def create_app() -> FastAPI:
@@ -51,7 +54,7 @@ def create_app() -> FastAPI:
             return stub_decide(req)
         return await decide(req)
 
-    # Static game client (vendored Phaser, zero runtime deps beyond our API).
+    # Static game client (procedural pixel Canvas, zero deps beyond our API).
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
