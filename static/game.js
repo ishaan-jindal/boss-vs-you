@@ -1415,31 +1415,6 @@ function updateHUD() {
   $('btn-special').classList.toggle('cool', cd(F.specT, S.specialCd) > 0);
   $('btn-dash').classList.toggle('cool', !dashReady);
   $('btn-potion').classList.toggle('cool', S.potionsLeft <= 0);
-  partybar();
-}
-/* Room HUD: the 4 existing #partybar slots carry hero HP, boss HP, add
- * pips, and depth/XP. No new DOM ids — children are fill-only. */
-function partybar() {
-  const slots = document.querySelectorAll('#partybar .party-slot');
-  if (!slots || slots.length < 4 || !F) return;
-  const S = F.stats;
-  const fill = (i, frac, cls, txt) => { // bar slots: 0 hero HP, 1 boss HP
-    const el = slots[i];
-    if (!el.dataset.init) { el.dataset.init = '1'; el.innerHTML = '<div class="pfill"></div><span class="pips"></span>'; }
-    el.querySelector('.pfill').style.width = (clamp(frac, 0, 1) * 100).toFixed(1) + '%';
-    el.querySelector('.pfill').className = 'pfill ' + cls;
-    el.querySelector('.pips').textContent = txt;
-  };
-  const note = (i, txt) => { // text slots: 2 add pips, 3 depth/XP
-    const el = slots[i];
-    if (!el.dataset.init) { el.dataset.init = '1'; el.innerHTML = '<span class="pips"></span>'; }
-    el.querySelector('.pips').textContent = txt;
-  };
-  fill(0, S.hp / S.maxHp, 'you', String(Math.max(0, Math.round(S.hp))));
-  fill(1, F.boss.hp / F.boss.maxHp, 'boss', String(Math.max(0, Math.round(F.boss.hp))));
-  const alive = (F.minions || []).length;
-  note(2, '●'.repeat(alive) + '○'.repeat(Math.max(0, MINION_CAP - alive)));
-  note(3, 'D' + S.descent + ' ' + Math.floor(S.xp) + '/' + xpThreshold(S.level));
 }
 function fmtCd(v) { return v > 0 ? v.toFixed(1) + 's' : 'READY'; }
 function setBar(id, v, max) {
