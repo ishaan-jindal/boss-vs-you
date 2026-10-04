@@ -2,6 +2,8 @@
 
 A real-time pixel-dungeon boss battler. You descend, room by room, against **one transforming boss played by an LLM** — and it learns your habits across runs to hunt you better.
 
+**Play it live: https://boss-vs-you.onrender.com** (free tier — first load takes ~50s to wake up).
+
 - **Room-clear descent loop** — every descent is a cramped gothic room: kill the minions, crack the boss phase, draft a card, go deeper.
 - **A boss with a brain** — Gemini (DeepInfra failover, deterministic stub offline) picks tactics, forms, and minion spawns. Never a 500: every failure lands on the rule-based stub.
 - **It learns you** — your last 60 fights (turtle ratio, dash spam, potion timing, range preference, death causes) feed the boss's prompt.
