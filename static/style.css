@@ -389,6 +389,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 
 /* ---------- level-up draft (reuses .screen/.panel/.kicker/.big-btn language) ---------- */
 #screen-draft { z-index: 16; } /* above HUD/buttons: the pick owns the screen while paused */
+#screen-pause { z-index: 16; } /* same: the pause owns the screen while paused */
 .draft-panel { max-width: 680px; }
 #draft-cards { display: flex; flex-direction: column; gap: 12px; margin: 10px 0 6px; }
 .draft-card {

@@ -7,12 +7,14 @@
  * DESIGNER HOOKS (stable names for a later visual pass):
  * DOM screens: #screen-menu, #screen-end (sections, .active shows),
  *   #screen-draft (level-up pick; driven directly, never via showScreen)
+ *   #screen-pause (pause menu; driven directly, never via showScreen)
  * HUD: #hud, #hp-player-fill, #hp-player-num, #hp-boss-fill, #hp-boss-num,
  *   #boss-name, #clock, #descent-badge, #cooldowns, #potion-count, #hint-bar
  * Draft: #draft-title, #draft-sub, #draft-cards (+ .draft-card, .key,
  *   .draft-meta/.draft-name/.draft-fx/.draft-why, .draft-tier)
  * End: #end-kicker, #end-title, #end-flavour, #end-stats (.stat-card),
  *   #end-build, #end-read, #end-ladder, #btn-rematch, #btn-bosses
+ * Pause: #btn-resume, #btn-restart, #btn-pause-mute, #btn-quit
  * Controls: #joy-zone (+ #joy-base, #joy-knob), #btn-attack, #btn-special,
  *   #btn-dash, #btn-potion
  * Juice: #arena-canvas, #pop-layer (.pop, .pop.static for reduced-motion),
@@ -58,6 +60,7 @@
  *     one-mid-fight-transform-per-fight rule (see applyBrain).
  */
 import { createArena } from './arena.js';
+import { sfx, toggle as toggleMute, isMuted } from './sfx.js';
 
 /* single immortal boss: forms arrive from /api/bosses, never hardcoded */
 const PX = 1 / 30; // legacy px -> world units (arena ~22 x 16 units)
@@ -300,6 +303,7 @@ function hitMinion(m, dmg, special) {
   hitstop(0.06);
   arena.burst(m.x, m.z, special ? 0xffd75e : 0xffffff, 6, 3);
   if (m.hp > 0) {
+    sfx('hit');
     spawnPop(m.x, 1.6, m.z, '-' + dmg, 'hit');
     return;
   }
@@ -307,6 +311,7 @@ function hitMinion(m, dmg, special) {
   if (i !== -1) F.minions.splice(i, 1);
   try { arena.killProjectile('mx' + m.id); } catch { /* visual only */ }
   arena.burst(m.x, m.z, 0xffe9a8, 12, 4);
+  sfx('death');
   const xp = minionXp(m.kind);
   F.stats.xp += xp;
   F.stats.potionsLeft = Math.min(3, F.stats.potionsLeft + 1); // adds feed the potion path, capped so rooms never print heals
@@ -656,6 +661,7 @@ function startFight() {
   if (!cfg) return; // forms not loaded yet — menu stays until /api/bosses lands
   refreshBalance(); // re-fetch the single source of truth on every run restart
   hideDraft(); // a dead run never leaves its draft open behind the new one
+  hidePause(); // same: a restart never leaves the pause open behind the new run
   const mySeq = ++fightSeq;
   const prev = F; // stale minion markers die here — the fresh F below cannot reach them
   const W = arena.ARENA_X, H = arena.ARENA_Z;
@@ -724,6 +730,7 @@ function startFight() {
   say((BOSS && BOSS.taunt_voice && BOSS.taunt_voice[0]) || ('I am ' + cfg.name + '!'));
   arena.shake(0.7);
   arena.dust(0, 0, 10, 0xd8c49a, 3);
+  sfx('ui');
   think(true);
 }
 
@@ -751,6 +758,7 @@ function doTransform(newForm, isMidFight, read) {
   arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.6);
   arena.dust(F.bx, F.bz, 14, 0xd8c49a, 4);
   arena.shake(1.0);
+  sfx('clear');
   domFlash();
   setVignette(false);
   setBossChrome(def);
@@ -776,6 +784,11 @@ function later(ms, fn) {
     fn();
   };
   F.timeouts.push(setTimeout(fire, ms));
+}
+
+function syncMuteBtn() {
+  const b = $('btn-mute');
+  if (b) b.textContent = isMuted() ? 'SOUND: OFF' : 'SOUND: ON';
 }
 
 function refreshPotions() {
@@ -808,6 +821,7 @@ function tryAttack(special) {
     F.projectiles.push({ id, hero: true, x: F.px, z: F.pz, vx: (dx / m) * HERO_SPECIAL_PROJ_SPEED, vz: (dz / m) * HERO_SPECIAL_PROJ_SPEED, dmg: S.specialDmg, life: 2.5 });
     arena.spawnProjectile(id, F.px, F.pz);
     arena.burst(F.px, F.pz, 0xffd75e, 6, 3);
+    sfx('shoot');
     return;
   }
   const range = S.atkRange;
@@ -824,6 +838,7 @@ function tryAttack(special) {
     F.events.push('boss hit');
     hitstop(0.05);
     arena.burst(F.bx, F.bz, 0xffffff, 9, 4.5, 1.0 + F.flyY);
+    sfx('hit');
     arena.dust(F.bx, F.bz, 7);
     spawnPop(F.bx, 2.1 + F.flyY, F.bz, 'THWACK! -' + eff, 'hit');
     if (!REDUCED) arena.shake(0.35);
@@ -875,6 +890,7 @@ function tryPotion() {
   refreshPotions();
   F.events.push('player healed');
   arena.burst(F.px, F.pz, 0x7cff6b, 10, 3.5);
+  sfx('potion');
   spawnPop(F.px, 1.8, F.pz, '+' + heal + ' PATCHED!', 'heal');
 }
 
@@ -891,6 +907,7 @@ function hurtPlayer(dmg, why) {
   F.stats.hp -= eff;
   F.events.push('player hit' + (why ? ' (' + why + ')' : ''));
   if (eff > 0) {
+    sfx('hurt');
     hitstop(0.07);
     arena.burst(F.px, F.pz, 0xff5a4e, 10, 4);
     arena.dust(F.px, F.pz, 8);
@@ -1030,6 +1047,7 @@ function enterEnrage() {
   F.dmgMul = e.damage_mult || 1.25;
   arena.setEnrage(true);
   arena.shake(0.9);
+  sfx('hurt');
   arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.4);
   arena.dust(F.bx, F.bz, 14, 0xd8c49a, 4);
   setVignette(true);
@@ -1326,6 +1344,7 @@ function update(dt) {
         F.events.push('boss hit by special');
         hitstop(0.09);
         arena.burst(F.bx, F.bz, 0xffd75e, 14, 4.5, 1.0 + F.flyY);
+        sfx('hit');
         arena.spawnCrack(F.bx, F.bz, Math.random() * Math.PI * 2, 1.0);
         spawnPop(F.bx, 2.1 + F.flyY, F.bz, 'WHAM! -' + eff, 'special');
         if (!REDUCED) arena.shake(0.6);
@@ -1445,6 +1464,8 @@ function killBoss() {
   // HOOK(arena-impact): the fall wants a crack ring + pooling blood here —
   // a later lane's job. arena.spawnCrack / the blood-decal path own it.
   arena.burst(F.bx, F.bz, 0xffe9a8, 16, 5, 1.0 + F.flyY);
+  arena.shake(1.2);
+  sfx('clear');
   // 2. Attempt log (full habit shape) + the immortal write: the profile is
   // re-derived and persisted here, so it survives the run that just ended.
   const fightSecs = (performance.now() - F.fightT0) / 1000;
@@ -1674,11 +1695,38 @@ function hideDraft() {
   $('screen-draft').classList.remove('active');
 }
 
+/* Pause menu: same single-flag discipline as the draft (see setPaused) —
+ * pauseOpen only tracks the overlay; F.paused stays the one freeze flag.
+ * No timers here: opening/resuming is synchronous, so nothing can tick while paused. */
+let pauseOpen = false;
+function openPause() {
+  if (pauseOpen || draftOpen || state !== 'fight' || !F || F.over) return;
+  pauseOpen = true;
+  setPaused(true);
+  syncPauseMute();
+  $('screen-pause').classList.add('active');
+}
+function hidePause() {
+  pauseOpen = false;
+  const s = $('screen-pause');
+  if (s) s.classList.remove('active');
+}
+function resumePause() {
+  if (!pauseOpen) return;
+  hidePause();
+  setPaused(false);
+}
+function syncPauseMute() {
+  const b = $('btn-pause-mute');
+  if (b) b.textContent = isMuted() ? 'SOUND: OFF' : 'SOUND: ON';
+}
+
 function finish(won) {
   if (F.over) return;
   F.over = true;
   F.won = won;
   if (!won) {
+    sfx('death');
     // Death ends the run: log the final fight (full habit shape), bank the
     // deepest descent, and persist the profile — this write is what the next
     // run's first brain call reads.
@@ -1711,6 +1759,13 @@ function bindInput() {
     if (state === 'fight' && GAME_KEYS.has(e.code)) e.preventDefault();
     if (e.repeat) return;
     keys.add(e.code);
+    if (e.code === 'KeyM') { toggleMute(); syncMuteBtn(); syncPauseMute(); return; } // mute works from any screen
+    if (e.code === 'Escape' || e.code === 'KeyP') {
+      if (state !== 'fight' || !F || F.over || draftOpen) return; // draft/end overlays own the pause — not us
+      e.preventDefault();
+      if (pauseOpen) resumePause(); else openPause();
+      return;
+    }
     if (state !== 'fight' || !F || F.over || F.paused) return; // paused: inputs frozen
     if (e.code === 'KeyJ' || e.code === 'Space') tryAttack(false);
     else if (e.code === 'KeyK' || e.code === 'ShiftLeft' || e.code === 'ShiftRight') tryDash();
@@ -1812,6 +1867,13 @@ function boot() {
     '<li><b>' + k + '</b><span>' + v + '</span></li>').join('');
   buildMenu();
   showScreen('menu');
+  const mb = $('btn-mute');
+  if (mb) { syncMuteBtn(); mb.onclick = () => { toggleMute(); syncMuteBtn(); syncPauseMute(); sfx('ui'); }; }
+  $('btn-resume').onclick = () => { resumePause(); sfx('ui'); };
+  $('btn-restart').onclick = () => { hidePause(); startFight(); };
+  const pm = $('btn-pause-mute');
+  if (pm) { syncPauseMute(); pm.onclick = () => { toggleMute(); syncMuteBtn(); syncPauseMute(); sfx('ui'); }; }
+  $('btn-quit').onclick = () => { hidePause(); if (F) setPaused(false); buildMenu(); showScreen('menu'); };
   const fit = () => resizeArena();
   window.addEventListener('resize', fit);
   fit();

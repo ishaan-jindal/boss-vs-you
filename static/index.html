@@ -42,6 +42,7 @@
       <span id="clock">0:00</span>
       <span id="descent-badge">DESCENT 1 · LV 1</span>
       <span id="cooldowns"></span>
+      <button id="btn-mute" class="ghost-btn" type="button">SOUND: ON</button>
     </div>
     <div class="hp-panel boss">
       <span id="boss-name" class="hp-label">◆ BOSS</span>
@@ -89,6 +90,20 @@
     <p id="draft-sub" class="tagline"></p>
     <div id="draft-cards" role="listbox" aria-label="Level up cards"></div>
     <p class="footnote">No timer. The world is frozen solid. Pick when ready — keys 1–3, tap, or click.</p>
+  </div>
+</section>
+
+<!-- PAUSE (same .screen dim + single-flag freeze as draft; driven directly, never via showScreen) -->
+<section id="screen-pause" class="screen" aria-label="Pause menu">
+  <div class="panel">
+    <p class="kicker">PAUSED</p>
+    <div class="end-btns">
+      <button id="btn-resume" class="big-btn">▶ RESUME</button>
+      <button id="btn-restart" class="ghost-btn">↻ RESTART DESCENT</button>
+      <button id="btn-pause-mute" class="ghost-btn" type="button">SOUND: ON</button>
+      <button id="btn-quit" class="ghost-btn">← MENU</button>
+    </div>
+    <p class="footnote">Esc / P resumes. No timer. The world is frozen solid.</p>
   </div>
 </section>
 
