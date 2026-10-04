@@ -686,6 +686,7 @@ function startFight() {
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
     dashLeft: 1, dashRefillT: 0,
     dashDx: 0, dashDz: 0, dashing: 0, dashDist: 0, vx: 0, vz: 0, facing: Math.PI,
+    lastMove: null, // why: tap-dash with no held input needs the last nonzero walk dir, else it dashes stale/backward
     bx: 0, bz: Math.max(-H + 2.5, FLOOR_Z_MIN + 0.1), flyY: 0,
     enraged: false, flying: false,
     atkTmap: {}, tactic: 'pressure', speedMul: 1, dmgMul: 1, intensity: 0.5,
@@ -863,11 +864,22 @@ function tryDash() {
   F.ifrT = now + 0.25; // i-frames UNCHANGED (balance, not feel)
   F.dashing = FEEL_DASH_TIME; // duration UNCHANGED — mirrors the old 0.18 literal
   F.dashDist = 0;
-  let dx = F.joy.dx, dz = F.joy.dz;
-  if (Math.hypot(dx, dz) < 0.2) { // dash away from boss by default
-    dx = F.px - F.bx; dz = F.pz - F.bz;
-    const m = Math.hypot(dx, dz) || 1; dx /= m; dz /= m;
-  } else { const m = Math.hypot(dx, dz); dx /= m; dz /= m; }
+  // CURRENT input composite (same rule as update(): keyboard wins per axis,
+  // stick fills in, normalized) → last nonzero walk dir → facing-forward, never zero-length.
+  const sm0 = Math.hypot(F.joy.dx, F.joy.dz);
+  let sx0 = 0, sz0 = 0;
+  const resp0 = stickResponse(sm0);
+  if (resp0 > 0 && sm0 > 0) { sx0 = (F.joy.dx / sm0) * resp0; sz0 = (F.joy.dz / sm0) * resp0; }
+  let kx0 = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
+  let kz0 = (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) - (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0);
+  const km0 = Math.hypot(kx0, kz0);
+  if (km0 > 1) { kx0 /= km0; kz0 /= km0; }
+  let dx = kx0 !== 0 ? kx0 : sx0, dz = kz0 !== 0 ? kz0 : sz0;
+  if (Math.hypot(dx, dz) < 0.2) {
+    if (F.lastMove && Math.hypot(F.lastMove.x, F.lastMove.z) > 0) { dx = F.lastMove.x; dz = F.lastMove.z; }
+    else { dx = Math.sin(F.facing); dz = Math.cos(F.facing); }
+  }
+  { const m = Math.hypot(dx, dz) || 1; dx /= m; dz /= m; }
   F.dashDx = dx; F.dashDz = dz;
   logHist('dash');
   if (F.moves) F.moves.dash++; // habit hook: dash counted (dodges counted on i-frame save in hurtPlayer)
@@ -1263,6 +1275,7 @@ function update(dt) {
       const diff = ((want - F.facing + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
       const maxTurn = FEEL_TURN_RATE * dt;
       F.facing += clamp(diff, -maxTurn, maxTurn);
+      { const lm = Math.hypot(nx, nz); if (lm > 0) F.lastMove = { x: nx / lm, z: nz / lm }; }
     } else {
       F.stillSecs = (F.stillSecs || 0) + dt; // habit hook: time spent not moving feeds stationary_ratio
     }
