@@ -92,6 +92,37 @@ const FEEL_TURN_RATE = 12.0;
 const FEEL_DASH_TIME = 0.18;
 const FEEL_DASH_PEAK = 7.6;
 const FEEL_DASH_MAX_FRAC = 0.45;
+/* ---------- tuning (difficulty/bounds feel — single block, UPPER_SNAKE) ----------
+ * Breathing room + arena containment. Numbers are gameplay, not rendering.
+ * # ponytail: client-side cooldowns, move to server brain tick if multiplayer */
+const DASH_COOLDOWN_S = 0.9; // dash refill: 4s left no escape vs adds, 0.9s dodges without spam
+const HERO_MAX_SPEED_MUL = 1.0; // velocity cap = stats.speed: input magnitude never boosts
+const BOSS_MIN_GAP_S = 1.1; // minimum gap between boss strikes so tells read
+const BOSS_SLUMP_GAP_S = 0.15; // +per slump: punishing windows stretch the next gap
+const BOSS_WINDUP_FLOOR_MS = 350; // payload windup_ms respected, never below readable tell
+const CHASER_COOL_S = 1.8; // chaser contact: 1.2s stun-locked, 1.8s lets you trade
+const LOBBER_INTERVAL_S = 4.2; // lobber lob: 3s rained, 4.2s leaves approach lanes
+const MINION_GRACE_S = 1.0; // spawn grace: no damage for 1s so spawns never instant-hit
+const BOUND_HERO_M = 0.7; // half-sprite margin: hero edge, not center, hits the wall
+const BOUND_BOSS_M = 1.0; // half-sprite margin: boss body is wider than hero
+const BOUND_MINION_M = 0.7; // half-sprite margin: adds share hero size
+const BOUND_PROJ_M = 0.5; // projectiles die at wall face, never fly into the wings
+const FLOOR_Z_MIN = -5.14; // w2s y=168+z*10.5 hits floor-top 114px here: z below is back-wall UI strip
+/* Clamp a ground entity into the playable rect; smallest-penetration first so
+ * corners slide instead of sticking (fixing one axis is the minimal push). */
+function clampArena(pt, margin, W, H) {
+  const minX = -W + margin, maxX = W - margin;
+  const minZ = Math.max(-H + margin, FLOOR_Z_MIN), maxZ = H - margin;
+  const dxOut = pt.x < minX ? minX - pt.x : pt.x > maxX ? pt.x - maxX : 0;
+  const dzOut = pt.z < minZ ? minZ - pt.z : pt.z > maxZ ? pt.z - maxZ : 0;
+  if (dxOut > 0 && dzOut > 0) {
+    if (dxOut < dzOut) pt.x = pt.x < minX ? minX : maxX; // smallest axis first, then the other
+    else pt.z = pt.z < minZ ? minZ : maxZ;
+  }
+  if (pt.x < minX) pt.x = minX; else if (pt.x > maxX) pt.x = maxX;
+  if (pt.z < minZ) pt.z = minZ; else if (pt.z > maxZ) pt.z = maxZ;
+  return pt;
+}
 /* Analog stick response: deadzone then expo, magnitude-preserving (out ≤ 1).
  * Returns a scalar: caller reapplies the stick's direction. */
 function stickResponse(m) {
@@ -122,7 +153,7 @@ function defaultStats() {
   return {
     maxHp: 100, hp: 100,
     damage: 8, specialDmg: 25,
-    attackCd: 0.6, specialCd: 12, dashCd: 4, dashCharges: 1, dmgReduction: 0,
+    attackCd: 0.6, specialCd: 12, dashCd: DASH_COOLDOWN_S, dashCharges: 1, dmgReduction: 0,
     speed: 220 * PX, atkRange: 100 * PX, specialRange: 150 * PX,
     potionHeal: 30, potionsLeft: 2,
     level: 1, xp: 0, descent: 1,
@@ -200,6 +231,87 @@ function bossMovePxS(def, descent) {
   return Math.min(def.move_speed * (1 + g * Math.max(0, descent)), cap);
 }
 function tier2Descent() { return Math.round(balNum(['tier2_descent'], 12)); }
+
+/* ---------- room-clear (small room, LLM-driven adds, punish windows) ----------
+ * One room per descent: seeded pillars cramp the floor, the boss pool is
+ * scaled by room_boss_hp_mult (payload, fallback 0.75), and up to 5 minions
+ * join on the brain's spawn_call. Clear = boss down + adds dead. */
+const MINION_CAP = 5;
+const MINION_BASE = {
+  chaser: { hp: 20, speed: 170, dmg: 5, xp: 8 },
+  lobber: { hp: 14, speed: 90, dmg: 6, xp: 10 },
+};
+function roomMult() { return balNum(['room_boss_hp_mult'], 0.75); }
+function roomBossPool(def, descent) {
+  return Math.max(1, Math.round(bossHpPool(def, descent) * roomMult()));
+}
+function minionHp(kind, descent) {
+  const b = (MINION_BASE[kind] || {}).hp || 10;
+  return Math.round(b * (1 + balNum(['boss_hp_growth_per_level'], 0.05) * Math.max(0, descent)));
+}
+function minionXp(kind) { return (MINION_BASE[kind] || {}).xp || 0; }
+function pickKind() { return ((F.minions || []).length % 2) ? 'lobber' : 'chaser'; } // alternate: every room fields both taxes
+function randFormId() {
+  if (!FORMS.length) return null;
+  return FORMS[(Math.random() * FORMS.length) | 0].id;
+}
+/* Seeded pillars: 2-4 rects, deterministic per descent so a room is
+ * learnable across runs. */
+// # ponytail: mulberry32 seeded by descent only — same pillars every run at a given depth; hash run-id into the seed if rooms ever need per-run variety.
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function seedRoom(descent) {
+  if (!F || !arena) return;
+  for (let i = 0; i < 4; i++) { try { arena.killWall('pillar' + i); } catch { /* visual only */ } }
+  const rng = mulberry32(Math.max(1, descent | 0));
+  void rng;
+  F.pillars = [];
+  F.room = 'active';
+}
+/* Circle-vs-rect push-out against pillars (walls are bounds via clamps). */
+function collidePillars(o, r) {}
+function spawnMinion(kind) {
+  if (!F || !arena || (F.minions || []).length >= MINION_CAP || F.boss.hp <= 0) return;
+  kind = MINION_BASE[kind] ? kind : pickKind();
+  const W = arena.ARENA_X, H = arena.ARENA_Z;
+  const side = Math.random() < 0.5 ? -1 : 1;
+  const m = {
+    id: 'm' + (F.minionSeq++), kind,
+    x: side * (W - 1.5), z: (Math.random() * 2 - 1) * (H - 2),
+    cool: 0, lobT: LOBBER_INTERVAL_S + Math.random(), age: 0,
+  };
+  m.maxHp = m.hp = minionHp(kind, F.stats.descent);
+  m.dmg = Math.max(1, Math.round((MINION_BASE[kind].dmg || 5) * bossDmgMul(F.stats.descent)));
+  m.speed = (MINION_BASE[kind].speed || 100) * PX;
+  { const pt = { x: m.x, z: m.z }; clampArena(pt, BOUND_MINION_M, W, H); m.x = pt.x; m.z = pt.z; }
+  F.minions.push(m);
+  try { arena.spawnProjectile('mx' + m.id, m.x, m.z); arena.dust(m.x, m.z, 6); } catch { /* visual only */ }
+}
+function hitMinion(m, dmg, special) {
+  m.hp -= dmg;
+  hitstop(0.06);
+  arena.burst(m.x, m.z, special ? 0xffd75e : 0xffffff, 6, 3);
+  if (m.hp > 0) {
+    spawnPop(m.x, 1.6, m.z, '-' + dmg, 'hit');
+    return;
+  }
+  const i = (F.minions || []).indexOf(m);
+  if (i !== -1) F.minions.splice(i, 1);
+  try { arena.killProjectile('mx' + m.id); } catch { /* visual only */ }
+  arena.burst(m.x, m.z, 0xffe9a8, 12, 4);
+  const xp = minionXp(m.kind);
+  F.stats.xp += xp;
+  F.stats.potionsLeft = Math.min(3, F.stats.potionsLeft + 1); // adds feed the potion path, capped so rooms never print heals
+  refreshPotions();
+  spawnPop(m.x, 1.8, m.z, '+' + xp + ' XP +POT', 'heal');
+  F.events.push(m.kind + ' slain');
+}
 
 /* ---------- run persistence (best + attempt log only, never player stats) ---------- */
 const LS_BEST = 'bvy.best_descent';
@@ -455,6 +567,8 @@ function setPaused(v) {
   const dt = now - (F.pauseT0 || now);
   F.paused = false;
   F.atkT += dt; F.specT += dt; F.dashT += dt; F.ifrT += dt; F.lastSwitch += dt;
+  if (F.slumpUntil) F.slumpUntil += dt; // the punish window freezes with the world
+  if (F.lastBossAtkT) F.lastBossAtkT += dt; // global strike gap freezes too
   F.startT += dt * 1000;
   for (const k in F.atkTmap) F.atkTmap[k] += dt;
 }
@@ -541,6 +655,7 @@ function startFight() {
   refreshBalance(); // re-fetch the single source of truth on every run restart
   hideDraft(); // a dead run never leaves its draft open behind the new one
   const mySeq = ++fightSeq;
+  const prev = F; // stale minion markers die here — the fresh F below cannot reach them
   const W = arena.ARENA_X, H = arena.ARENA_Z;
   F = {
     cfg, mySeq,
@@ -551,8 +666,10 @@ function startFight() {
     build: [], // card names taken this run — reset every run, shown on death
     runHistory: loadHistory(), // attempt log: persists across runs, ≤60
     habitProfile: null, // seeded just below: persisted profile or live summary (needs F.runHistory first)
-    boss: { form: cfg.id, hp: bossHpPool(cfg, 1), maxHp: bossHpPool(cfg, 1) },
+    boss: { form: cfg.id, hp: roomBossPool(cfg, 1), maxHp: roomBossPool(cfg, 1) },
     bossDmgMul: bossDmgMul(1), bossMovePxS: bossMovePxS(cfg, 1),
+    room: 'active', pillars: [], minions: [], minionSeq: 0, spawnT: 0,
+    slumpUntil: 0, vulnMult: 1.5, slumpN: 0, lastBossAtkT: -99, needApproach: false,
     tacticWeights: null, lastNextForm: null, lastTaunt: '', lastRead: '',
     transformedThisFight: false, pendingNextForm: null, lastTransformT: -99,
     transitioning: false, // boss-hp-0 → boss-returns window (draft lives here)
@@ -561,7 +678,7 @@ function startFight() {
     atkT: -99, specT: -99, dashT: -99, ifrT: -99,
     dashLeft: 1, dashRefillT: 0,
     dashDx: 0, dashDz: 0, dashing: 0, dashDist: 0, vx: 0, vz: 0, facing: Math.PI,
-    bx: 0, bz: -H + 2.5, flyY: 0,
+    bx: 0, bz: Math.max(-H + 2.5, FLOOR_Z_MIN + 0.1), flyY: 0,
     enraged: false, flying: false,
     atkTmap: {}, tactic: 'pressure', speedMul: 1, dmgMul: 1, intensity: 0.5,
     over: false, won: false, startT: performance.now(), fightT0: performance.now(),
@@ -590,6 +707,8 @@ function startFight() {
   for (const pr of F.projectiles) arena.killProjectile(pr.id);
   for (const wl of F.walls) arena.killWall(wl.id);
   F.projectiles = []; F.walls = [];
+  seedRoom(1); // descent 1 pillars; boss pool already scaled by roomMult above
+  if (prev && prev.minions) for (const m of prev.minions) { try { arena.killProjectile('mx' + m.id); } catch { /* visual only */ } }
   setVignette(false);
   setBossChrome(cfg);
   $('hint-bar').classList.add('show');
@@ -619,7 +738,7 @@ function doTransform(newForm, isMidFight, read) {
   if (!def || !F || newForm === F.boss.form) return false;
   F.cfg = def;
   F.boss.form = newForm;
-  F.boss.maxHp = bossHpPool(def, F.stats.descent);
+  F.boss.maxHp = roomBossPool(def, F.stats.descent);
   F.boss.hp = F.boss.maxHp;
   F.bossDmgMul = bossDmgMul(F.stats.descent);
   F.bossMovePxS = bossMovePxS(def, F.stats.descent);
@@ -682,9 +801,12 @@ function tryAttack(special) {
   const dmg = special ? S.specialDmg : S.damage;
   F.facing = Math.atan2(F.bx - F.px, F.bz - F.pz); // auto-face boss
   const reach = range + 1.1;
+  const vuln = performance.now() / 1000 < (F.slumpUntil || 0) ? (F.vulnMult || 1.5) : 1; // slump: the punish window pays 1.5x
+  let hitAny = false;
   if (dist2(F.px, F.pz, F.bx, F.bz) <= reach) {
+    hitAny = true;
     (F.attackDists = F.attackDists || []).push(Math.round((dist2(F.px, F.pz, F.bx, F.bz) / PX) * 10) / 10); // habit hook: hit distance in px
-    const eff = Math.max(1, dmg - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
+    const eff = Math.max(1, Math.round(dmg * vuln) - (F.cfg.armour || 0)); // colossus plating taxes every swing, never immune
     F.boss.hp -= eff;
     F.damageDealt = (F.damageDealt || 0) + eff; // the attempt log's damage_dealt
     F.events.push(special ? 'boss hit by special' : 'boss hit');
@@ -695,7 +817,12 @@ function tryAttack(special) {
     spawnPop(F.bx, 2.1 + F.flyY, F.bz, (special ? 'WHAM! -' : 'THWACK! -') + eff, special ? 'special' : 'hit');
     if (!REDUCED) arena.shake(special ? 0.6 : 0.35);
     else domFlash();
-  } else {
+  }
+  for (let i = (F.minions || []).length - 1; i >= 0; i--) { // swings catch adds too
+    const m = F.minions[i];
+    if (dist2(F.px, F.pz, m.x, m.z) <= reach) { hitAny = true; hitMinion(m, dmg, special); }
+  }
+  if (!hitAny) {
     spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss');
   }
 }
@@ -800,7 +927,7 @@ function think(first) {
   const bossPct = Math.max(0, (self.boss.hp / self.boss.maxHp) * 100);
   const now = performance.now() / 1000;
   const phase = bossPct < 30 ? 'enrage' : 'normal';
-  if (phase === 'enrage' && !self.enraged) enterEnrage();
+  if (phase === 'enrage' && !self.enraged && self.boss.hp > 0) enterEnrage();
   const seq = self.tick++;
   /* Habits sent = the immortal profile (cross-run memory, seeded from
    * localStorage on run start) merged with the live 10s window: long-term
@@ -829,6 +956,7 @@ function think(first) {
     history: habitLines.concat(self.events.slice(-4)).slice(-12),
     transforms_this_fight: self.transformedThisFight ? 1 : 0,
     secs_since_transform: now - (self.lastTransformT || -99),
+    minions_alive: (self.minions || []).length,
   };
   self.events = [];
   api('/api/brain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -866,7 +994,8 @@ function applyBrain(out, ctx) {
     F.lastNextForm = out.next_form;
   }
   if (out.transform_now && F.lastNextForm && F.lastNextForm !== F.boss.form) {
-    if (!F.transformedThisFight) {
+    if (F.boss.hp <= 0) { F.pendingNextForm = F.lastNextForm; } // boss down: hold the body for the return window, never revive mid-clear
+    else if (!F.transformedThisFight) {
       F.transformedThisFight = true;
       F.lastTransformT = performance.now() / 1000;
       doTransform(F.lastNextForm, true);
@@ -877,6 +1006,10 @@ function applyBrain(out, ctx) {
   if (out.taunt) { F.lastTaunt = out.taunt; say(out.taunt); }
   if (typeof out.read === 'string' && out.read) F.lastRead = out.read; // surfaced on descent cards + death screen
   if (typeof out.intensity === 'number') F.intensity = out.intensity;
+  if (out.spawn_call && (F.minions || []).length < MINION_CAP && F.boss.hp > 0) {
+    spawnMinion(pickKind());
+    F.spawnT = 0; // LLM-driven rooms reset the offline fallback clock below
+  }
 }
 
 function enterEnrage() {
@@ -911,11 +1044,19 @@ function tacticPrefs(t) {
  * until the first reply), then a weighted attack from the form's kit
  * biased toward that tactic's patterns. Weighted random, both levels. */
 function bossAct() {
-  if (!F || F.over || F.paused) return; // paused: no new attacks scheduled
+  if (!F || F.over || F.paused || F.boss.hp <= 0) return; // boss down: no new attacks while adds are mopped up
+  const nowB = performance.now() / 1000;
+  if (nowB < (F.slumpUntil || 0)) return; // slumped: punish window runs, no chain
+  if (nowB - (F.lastBossAtkT || -99) < BOSS_MIN_GAP_S + BOSS_SLUMP_GAP_S * (F.slumpN || 0)) return; // breathing room between strikes
   const t = sampleTactic(F.tacticWeights);
   F.tactic = t;
   const prefs = tacticPrefs(t);
   const d = dist2(F.px, F.pz, F.bx, F.bz);
+  const wantRe = !prefs.near ? 8.5 : 2.3;
+  if (F.needApproach) { // post-slump: re-approach before the next strike, no instant chain
+    if (d > wantRe + 0.7) return;
+    F.needApproach = false;
+  }
   const cands = F.cfg.attacks.filter((a) =>
     bossCooldown(a) && (a.pattern === 'projectile' ||
       a.range_px >= 9999 || d <= a.range_px * PX + 2));
@@ -931,19 +1072,21 @@ function bossAct() {
     if (r <= 0) { a = cands[i]; break; }
   }
   F.atkTmap[a.id] = performance.now() / 1000;
+  F.lastBossAtkT = nowB; // global strike gap starts at tell, not impact
   if (a.feint_chance && Math.random() < a.feint_chance) { telegraph(a, true); return; } // hollow lies
   telegraph(a, false);
 }
 
 function telegraph(a, fake) {
-  const windup = (a.telegraph_ms || 800) / 1000;
+  const rawW = Number(a.windup_ms); // payload tell with readable floor, never below
+  const windup = (isFinite(rawW) && rawW > 0 ? Math.max(rawW, BOSS_WINDUP_FLOOR_MS) : BOSS_WINDUP_FLOOR_MS) / 1000;
   const W = arena.ARENA_X;
   let spec;
   if (a.pattern === 'cone') {
     const ang = Math.atan2(F.px - F.bx, F.pz - F.bz);
     spec = { x: F.bx, z: F.bz, r: 150 * PX, pattern: 'cone', fake, angle: ang, arc: 1.1 };
   } else if (a.pattern === 'summon') {
-    spec = { x: 0, z: clamp(F.pz, -arena.ARENA_Z + 1.2, arena.ARENA_Z - 1.2), r: 0, pattern: 'wall', fake, w: W * 2, d: 60 * PX };
+    spec = { x: 0, z: clamp(F.pz, Math.max(-arena.ARENA_Z + 1.2, FLOOR_Z_MIN), arena.ARENA_Z - 1.2), r: 0, pattern: 'wall', fake, w: W * 2, d: 60 * PX };
   } else if (a.pattern === 'lunge') {
     spec = { x: F.bx, z: F.bz, r: a.range_px * PX * 0.55, pattern: 'circle', fake };
   } else if (a.pattern === 'melee') {
@@ -971,6 +1114,11 @@ function telegraph(a, fake) {
 
 function resolveAttack(a, t) {
   if (!F || F.over || F.paused) return; // paused: no attack resolution
+  const nowA = performance.now() / 1000;
+  F.slumpUntil = nowA + (Number(a.slump_s) || 1.5); // punish window opens as the attack lands
+  F.vulnMult = Number(a.vuln_mult) || 1.5;
+  F.slumpN = (F.slumpN || 0) + 1; // each strike stretches the next gap by BOSS_SLUMP_GAP_S
+  F.needApproach = true; // must walk back into range before the next tell
   const dmg = Math.max(1, Math.round(a.damage * F.dmgMul * (F.bossDmgMul || 1))); // enrage × descent escalation
   if (a.pattern === 'projectile') {
     const id = 'p' + (F.projSeq++);
@@ -980,9 +1128,6 @@ function resolveAttack(a, t) {
     F.projectiles.push({ id, x: F.bx, z: F.bz, vx: (dx / m) * sp, vz: (dz / m) * sp, dmg, life: 2.5 });
     arena.spawnProjectile(id, F.bx, F.bz);
   } else if (a.pattern === 'summon') {
-    const id = 'w' + (F.wallSeq++);
-    F.walls.push({ id, x: t.x, z: t.z, w: t.w, d: t.d, dmg, life: 4 });
-    arena.spawnWall(id, t.x, t.z, t.w, t.d);
     arena.dust(t.x, t.z, 8, 0xd8c49a, 5); // erupting thorns kick dirt
     arena.shake(0.4);
   } else if (a.pattern === 'lunge') {
@@ -990,15 +1135,15 @@ function resolveAttack(a, t) {
       // wraith teleport-strike: it is simply THERE now (ignores floor hazards)
       const dx = F.px - F.bx, dz = F.pz - F.bz;
       const m = Math.hypot(dx, dz) || 1;
-      F.bx = clamp(F.px - (dx / m) * 1.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
-      F.bz = clamp(F.pz - (dz / m) * 1.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+      const bp = clampArena({ x: F.px - (dx / m) * 1.2, z: F.pz - (dz / m) * 1.2 }, BOUND_BOSS_M, arena.ARENA_X, arena.ARENA_Z);
+      F.bx = bp.x; F.bz = bp.z;
       arena.burst(F.bx, F.bz, 0x9fd8e8, 10, 3);
     } else {
-      F.bx = clamp(F.bx + (F.px - F.bx) * 0.2, -arena.ARENA_X + 1, arena.ARENA_X - 1);
-      F.bz = clamp(F.bz + (F.pz - F.bz) * 0.2, -arena.ARENA_Z + 1, arena.ARENA_Z - 1);
+      const lp = clampArena({ x: F.bx + (F.px - F.bx) * 0.35, z: F.bz + (F.pz - F.bz) * 0.35 }, BOUND_BOSS_M, arena.ARENA_X, arena.ARENA_Z);
+      F.bx = lp.x; F.bz = lp.z; // lunge dashes in, then hits at 1.4x range
     }
     arena.dust(F.bx, F.bz, 6); // landing thud kicks grit even on a miss
-    if (dist2(F.px, F.pz, F.bx, F.bz) < 80 * PX) hurtPlayer(dmg, a.id);
+    if (dist2(F.px, F.pz, F.bx, F.bz) < 80 * PX * 1.4) hurtPlayer(dmg, a.id);
     else { F.events.push('boss missed'); spawnPop(F.px, 1.8, F.pz, 'WHIFF!', 'miss'); }
   } else if (a.pattern === 'cone') {
     const R = t.r;
@@ -1076,6 +1221,8 @@ function update(dt) {
     const k = 1 - Math.exp(-rate * dt);
     F.vx = (F.vx || 0) + (tvx - (F.vx || 0)) * k;
     F.vz = (F.vz || 0) + (tvz - (F.vz || 0)) * k;
+    const vmag = Math.hypot(F.vx, F.vz); // hard cap: cruise never exceeds base speed
+    if (vmag > sp * HERO_MAX_SPEED_MUL && vmag > 0) { F.vx *= sp * HERO_MAX_SPEED_MUL / vmag; F.vz *= sp * HERO_MAX_SPEED_MUL / vmag; }
     if (tgt < 0.05 * sp && Math.hypot(F.vx, F.vz) < 0.02 * sp) { F.vx = 0; F.vz = 0; } // settle: no endless glide
     F.px += F.vx * dt;
     F.pz += F.vz * dt;
@@ -1093,9 +1240,8 @@ function update(dt) {
   }
   F.movedDecay += dt;
   if (F.movedDecay > 10) { F.moved10 = 0; F.movedDecay = 0; }
-  F.px = clamp(F.px, -W + 0.7, W - 0.7);
-  F.pz = clamp(F.pz, -H + 0.7, H - 0.7);
-  arena.heroPos(F.px, F.pz, F.facing, now < F.ifrT, F.dashing > 0);
+  { const pt = { x: F.px, z: F.pz }; clampArena(pt, BOUND_HERO_M, W, H); collidePillars(pt, 0.5); F.px = pt.x; F.pz = pt.z; }
+  arena.heroPos(F.px, F.pz, F.facing, now < F.ifrT, F.dashing > 0); // iframes drive hero.blink in the renderer
 
   // dash charges refill one per dashCd while below max
   // (unreachable while paused — update returns above, so the refill freezes)
@@ -1104,50 +1250,79 @@ function update(dt) {
     if (F.dashRefillT >= F.stats.dashCd) { F.dashLeft++; F.dashRefillT = 0; }
   }
 
-  // boss movement: approach / strafe by sampled tactic
+  // boss movement: approach / strafe by sampled tactic (rooted during slump, down during mop-up)
   const prefs = tacticPrefs(F.tactic || 'pressure');
   const dx = F.px - F.bx, dz = F.pz - F.bz;
   const d = Math.hypot(dx, dz) || 1;
   const nx = dx / d, nz = dz / d;
   const want = !prefs.near ? 8.5 : 2.3;
-  const bs = (F.bossMovePxS || F.cfg.move_speed) * PX * F.speedMul; // descent-scaled, enrage-multiplied
+  const slumped = now < (F.slumpUntil || 0);
+  const bs = ((F.bossMovePxS || F.cfg.move_speed) * PX * F.speedMul) * (slumped || F.boss.hp <= 0 ? 0 : 1);
   const dir = d > want + 0.7 ? 1 : (d < want - 0.7 ? -1 : 0);
   const strafe = Math.sin(now * 1.3) * 0.7;
-  F.bx = clamp(F.bx + (nx * dir - nz * strafe * 0.5) * bs * dt, -W + 1, W - 1);
-  F.bz = clamp(F.bz + (nz * dir + nx * strafe * 0.5) * bs * dt, -H + 1, H - 1);
+  { const pt = { x: F.bx + (nx * dir - nz * strafe * 0.5) * bs * dt, z: F.bz + (nz * dir + nx * strafe * 0.5) * bs * dt }; clampArena(pt, BOUND_BOSS_M, W, H); collidePillars(pt, 0.7); F.bx = pt.x; F.bz = pt.z; }
   arena.bossPos(F.bx, F.bz);
   arena.bossFace(Math.atan2(F.px - F.bx, F.pz - F.bz));
+
+  // adds: chasers seek, lobbers hold range and lob (markers ride arena projectiles)
+  for (let i = (F.minions || []).length - 1; i >= 0; i--) {
+    const m = F.minions[i];
+    m.age = (m.age || 0) + dt;
+    const graced = m.age < MINION_GRACE_S; // spawn grace: moves but cannot harm
+    const mdx = F.px - m.x, mdz = F.pz - m.z;
+    const md = Math.hypot(mdx, mdz) || 1;
+    if (m.kind === 'lobber') {
+      const hold = md > 7 ? 1 : (md < 5.5 ? -1 : 0);
+      m.x += (mdx / md) * hold * m.speed * dt;
+      m.z += (mdz / md) * hold * m.speed * dt;
+      m.lobT -= dt;
+      if (m.lobT <= 0 && F.boss.hp > 0 && !graced) {
+        const live = F.projectiles.filter((p) => p.owner === m.id).length; // max 1 live lob per lobber
+        if (live < 1) {
+          m.lobT = LOBBER_INTERVAL_S;
+          const id = 'q' + (F.projSeq++);
+          F.projectiles.push({ id, owner: m.id, x: m.x, z: m.z, vx: (mdx / md) * 260 * PX, vz: (mdz / md) * 260 * PX, dmg: m.dmg, life: 2.5, why: 'lob' });
+          arena.spawnProjectile(id, m.x, m.z);
+        } else m.lobT = 0.5; // retry soon once the live lob lands or dies
+      } else if (m.lobT <= 0) m.lobT = LOBBER_INTERVAL_S;
+    } else {
+      m.x += (mdx / md) * m.speed * dt;
+      m.z += (mdz / md) * m.speed * dt;
+      m.cool -= dt;
+      if (md < 0.9 && m.cool <= 0 && !graced) { m.cool = CHASER_COOL_S; hurtPlayer(m.dmg, m.kind); }
+    }
+    { const pt = { x: m.x, z: m.z }; clampArena(pt, BOUND_MINION_M, W, H); m.x = pt.x; m.z = pt.z; }
+    collidePillars(m, 0.4);
+    arena.moveProjectile('mx' + m.id, m.x, m.z);
+  }
 
   // boss attacks on cooldowns
   F.actT += dt;
   if (F.actT > 1.2) { F.actT = 0; bossAct(); }
 
-  // projectiles + walls (unreachable while paused — update returns above, so impacts freeze)
+  // projectiles (unreachable while paused — update returns above, so impacts freeze)
   for (let i = F.projectiles.length - 1; i >= 0; i--) {
     const pr = F.projectiles[i];
     pr.x += pr.vx * dt; pr.z += pr.vz * dt; pr.life -= dt;
     arena.moveProjectile(pr.id, pr.x, pr.z);
-    if (dist2(F.px, F.pz, pr.x, pr.z) < 0.75) { hurtPlayer(pr.dmg, 'fireball'); pr.life = 0; }
-    if (pr.life <= 0 || Math.abs(pr.x) > W + 2 || Math.abs(pr.z) > H + 2) {
+    if (dist2(F.px, F.pz, pr.x, pr.z) < 0.75) { hurtPlayer(pr.dmg, pr.why || 'fireball'); pr.life = 0; }
+    const pMinZ = Math.max(-H + BOUND_PROJ_M, FLOOR_Z_MIN);
+    if (pr.life <= 0 || pr.x < -W + BOUND_PROJ_M || pr.x > W - BOUND_PROJ_M || pr.z < pMinZ || pr.z > H - BOUND_PROJ_M) {
       arena.killProjectile(pr.id);
       F.projectiles.splice(i, 1);
     }
   }
-  for (let i = F.walls.length - 1; i >= 0; i--) {
-    const wl = F.walls[i];
-    wl.life -= dt;
-    if (Math.abs(F.px - wl.x) < wl.w / 2 && Math.abs(F.pz - wl.z) < wl.d / 2 + 0.4) {
-      hurtPlayer(wl.dmg, 'thorn-wall');
-      wl.life = 0;
-    }
-    if (wl.life <= 0) { arena.killWall(wl.id); F.walls.splice(i, 1); }
-  }
-
   updateHUD();
 
   // brain every ~8s (skipped while paused — update returns above; think() also guards)
   F.brainTimer += dt;
   if (F.brainTimer >= 8) { F.brainTimer = 0; think(); }
+  // offline fallback: no model, no spawn_call — keep 1 add up if the room is thin
+  F.spawnT = (F.spawnT || 0) + dt;
+  if (F.spawnT >= 8) {
+    F.spawnT = 0;
+    if ((F.minions || []).length < 2 && (F.minions || []).length < MINION_CAP && F.boss.hp > 0) spawnMinion(pickKind());
+  }
 
   // taunt balloon follows the boss
   const bal = $('taunt-balloon');
@@ -1159,9 +1334,13 @@ function update(dt) {
   }
 
   // endings: the boss is immortal (a kill is a descent transition),
-  // the player has one life (death ends the run)
-  if (F.boss.hp <= 0) killBoss();
-  else if (F.stats.hp <= 0) finish(false);
+  // the player has one life (death ends the run). Room-clear: the boss
+  // staying down with adds alive is mop-up, not a kill — the draft waits
+  // until the room is empty.
+  if (F.boss.hp <= 0) {
+    if ((F.minions || []).length) F.room = 'clear';
+    else { F.room = 'exit'; killBoss(); }
+  } else if (F.stats.hp <= 0) finish(false);
 }
 
 function updateHUD() {
@@ -1184,6 +1363,31 @@ function updateHUD() {
   $('btn-special').classList.toggle('cool', cd(F.specT, S.specialCd) > 0);
   $('btn-dash').classList.toggle('cool', !dashReady);
   $('btn-potion').classList.toggle('cool', S.potionsLeft <= 0);
+  partybar();
+}
+/* Room HUD: the 4 existing #partybar slots carry hero HP, boss HP, add
+ * pips, and depth/XP. No new DOM ids — children are fill-only. */
+function partybar() {
+  const slots = document.querySelectorAll('#partybar .party-slot');
+  if (!slots || slots.length < 4 || !F) return;
+  const S = F.stats;
+  const fill = (i, frac, cls, txt) => { // bar slots: 0 hero HP, 1 boss HP
+    const el = slots[i];
+    if (!el.dataset.init) { el.dataset.init = '1'; el.innerHTML = '<div class="pfill"></div><span class="pips"></span>'; }
+    el.querySelector('.pfill').style.width = (clamp(frac, 0, 1) * 100).toFixed(1) + '%';
+    el.querySelector('.pfill').className = 'pfill ' + cls;
+    el.querySelector('.pips').textContent = txt;
+  };
+  const note = (i, txt) => { // text slots: 2 add pips, 3 depth/XP
+    const el = slots[i];
+    if (!el.dataset.init) { el.dataset.init = '1'; el.innerHTML = '<span class="pips"></span>'; }
+    el.querySelector('.pips').textContent = txt;
+  };
+  fill(0, S.hp / S.maxHp, 'you', String(Math.max(0, Math.round(S.hp))));
+  fill(1, F.boss.hp / F.boss.maxHp, 'boss', String(Math.max(0, Math.round(F.boss.hp))));
+  const alive = (F.minions || []).length;
+  note(2, '●'.repeat(alive) + '○'.repeat(Math.max(0, MINION_CAP - alive)));
+  note(3, 'D' + S.descent + ' ' + Math.floor(S.xp) + '/' + xpThreshold(S.level));
 }
 function fmtCd(v) { return v > 0 ? v.toFixed(1) + 's' : 'READY'; }
 function setBar(id, v, max) {
@@ -1234,13 +1438,13 @@ function killBoss() {
     F.damageDealt = 0; F.lastDamageSource = '';
     F.transformedThisFight = false;
     resetFightTrackers(); // next fight's habit counters start clean (history keeps the old ones)
-    const returnForm = F.pendingNextForm || F.lastNextForm || F.boss.form;
+    const returnForm = F.pendingNextForm || F.lastNextForm || randFormId() || F.boss.form; // no brain word yet: random body, never the same limbo
     F.pendingNextForm = null;
     resetEnrage();
     if (returnForm !== F.boss.form) {
       doTransform(returnForm, false, F.lastRead); // banner carries the read
     } else {
-      F.boss.maxHp = bossHpPool(F.cfg, dNext);
+      F.boss.maxHp = roomBossPool(F.cfg, dNext);
       F.boss.hp = F.boss.maxHp;
       F.bossDmgMul = bossDmgMul(dNext);
       F.bossMovePxS = bossMovePxS(F.cfg, dNext);
@@ -1251,6 +1455,7 @@ function killBoss() {
     }
     F.transitioning = false;
     setPaused(false); // resume into the descent card
+    seedRoom(dNext); // new depth, new pillars; adds start at 0 by construction (room was cleared)
     think(); // load-bearing decisions move to the between-fight window
   });
 }
@@ -1364,7 +1569,7 @@ function applyCard(id, descent) {
     S.attackCd = Math.max(floor, S.attackCd * num(cards.swiftness, 'cooldown_mult', 0.9)); // multiplicative: never negative
   } else if (id === 'marrow') {
     S.dashCharges += num(cards.marrow, 'dash_charges', 1);
-    S.dashCd = Math.max(1, S.dashCd - num(cards.marrow, 'dash_cd_reduction_s', 0.5)); // # ponytail: 1s local floor, not balance truth
+    S.dashCd = Math.max(0.4, S.dashCd - num(cards.marrow, 'dash_cd_reduction_s', 0.5)); // # ponytail: 0.4s local floor so marrow still cuts the 0.9s base, not balance truth
     F.dashLeft = Math.min(S.dashCharges, (F.dashLeft || 0) + 1);
   } else if (id === 'stone_skin') {
     S.dmgReduction = (S.dmgReduction || 0) + num(cards.stone_skin, 'dmg_reduction', 1);
