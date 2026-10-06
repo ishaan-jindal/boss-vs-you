@@ -7,11 +7,38 @@ failures → retry once → rule-based fallback. Never a 500 from a bad model.
 
 from __future__ import annotations
 
+import logging
+import re
+
 from pydantic import BaseModel, Field
 
-from . import bosses
-from .providers import generate, stubbed
+from . import bosses, jev
+from .habits import fallback_read, habit_summary
+from .providers import generate, keys as _provider_keys, stubbed
 from .safety import MAX_READ_LEN, MAX_TAUNT_LEN, SAFETY_RULES, is_taunt_clean
+
+log = logging.getLogger(__name__)
+
+# Slow prose cache: boss_id -> {"taunt": ..., "read": ...}. Gemma is only
+# hit when the cache is empty or req.seq % 4 == 0 (~32s cadence); stale
+# taunts are fine, structure stays fast via Jev every tick.
+_PROSE_CACHE: dict[str, dict[str, str]] = {}
+
+_KEY_RE = re.compile(r"(key=)[^&\s;\"]+")
+_BEARER_RE = re.compile(r"(Bearer )[^\s;\"]+")
+
+
+def _err_summary(exc: Exception) -> str:
+    # generate() wraps provider errors in RuntimeError("gemini: ..."), which
+    # buries the HTTP status; and messages may carry ?key= secrets or Bearer
+    # tokens. Keep type + redacted cause, truncated.
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status is not None:
+        return f"{type(exc).__name__} status={status}"
+    msg = _KEY_RE.sub(r"\1…", str(exc))
+    msg = _BEARER_RE.sub(r"\1…", msg)
+    msg = " ".join(msg.split())
+    return f"{type(exc).__name__}: {msg[:150]}" if msg else type(exc).__name__
 
 
 class BrainRequest(BaseModel):
@@ -44,6 +71,9 @@ class BrainRequest(BaseModel):
 
 class BrainResponse(BaseModel):
     seq: int
+    # True when a Gemma model drove this reply; False when the rule-based
+    # stub floor did (keyless, model error, illegal reply, unknown boss).
+    brain: bool = False
     tactics: dict[str, float]  # weights, non-empty, values >= 0
     next_form: str  # one of bosses.FORMS
     transform_now: bool = False
@@ -253,29 +283,102 @@ def _respond(req: BrainRequest, out) -> BrainResponse:
         intensity=out.intensity,
         minions_alive=max(0, req.minions_alive),
         spawn_call=bool(getattr(out, "spawn_call", False)),
+        brain=True,
     )
 
 
+async def _with_prose(req: BrainRequest, resp: BrainResponse) -> BrainResponse:
+    """Overlay slow Gemma prose onto a Jev structural reply.
+
+    Refresh only when the cache is empty or seq % 4 == 0; failures keep the
+    stub taunt/read. Never raises.
+    """
+    g, d = _provider_keys()
+    if not (g or d):
+        return resp
+    cached = _PROSE_CACHE.get(req.boss_id)
+    if cached is not None and req.seq % 4 != 0:
+        if is_taunt_clean(cached["taunt"]):
+            resp.taunt = cached["taunt"]
+            resp.read = cached.get("read", "")
+        return resp
+    try:
+        out = await generate(build_prompt(req))
+    except Exception as exc:  # noqa: BLE001 — stale cache or stub prose
+        log.warning("prose refresh failed: %s", _err_summary(exc))
+        if cached is not None and is_taunt_clean(cached["taunt"]):
+            resp.taunt = cached["taunt"]
+            resp.read = cached.get("read", "")
+        return resp
+    if is_taunt_clean(out.taunt):
+        _PROSE_CACHE[req.boss_id] = {"taunt": out.taunt, "read": out.read or ""}
+        resp.taunt = out.taunt
+        resp.read = out.read or ""
+    elif cached is not None and is_taunt_clean(cached["taunt"]):
+        resp.taunt = cached["taunt"]
+        resp.read = cached.get("read", "")
+    return resp
+
+
+def _strategy_for(req: BrainRequest) -> str:
+    """Gemma's latest playstyle read for this boss, else the deterministic one.
+
+    The slow strategic assessment Jev's fast tactical questions condition on.
+    Never raises; empty means habits alone.
+    """
+    cached = _PROSE_CACHE.get(req.boss_id)
+    if cached and cached.get("read"):
+        return cached["read"]
+    try:
+        return fallback_read(habit_summary(req.history or []))
+    except Exception:  # noqa: BLE001 — habits alone is a fine state
+        return ""
+
+
 async def decide(req: BrainRequest) -> BrainResponse:
-    """Main entry: stub when keyless, else model with retry-once then fallback."""
+    """Hybrid entry: Jev fast structure + Gemma slow prose, else stub.
+
+    Stub when neither Jev nor Gemma keys exist. Jev structural is tried
+    twice (same shape as the old Gemma path, same _legal/_respond gates
+    incl. can_transform); prose is overlaid from the slow cache. Jev
+    failure falls through to the legacy Gemma path when Gemma keys exist,
+    else the rule-based floor — never a 500.
+    """
     if stubbed():
+        log.info("brain stub: no model keys")
         return stub_decide(req)
 
+    # Fast path: Jev structural, conditioned on Gemma's strategy assessment.
+    if jev.has_key():
+        strategy = _strategy_for(req)
+        for attempt in (1, 2):
+            try:
+                out = await jev.jev_fields(req, strategy=strategy)
+                if _legal(req, out):
+                    log.info("jev: tactics=%s form=%s", out.tactics, out.next_form)
+                    return await _with_prose(req, _respond(req, out))
+            except Exception as exc:  # noqa: BLE001 — retry once, then Gemma/stub
+                log.warning("jev attempt %d failed: %s", attempt, _err_summary(exc))
+
+    # Legacy Gemma path (Gemma-only deploys, or Jev failed but Gemma lives).
+    g, d = _provider_keys()
+    if not (g or d):
+        return stub_decide(req)
     prompt = build_prompt(req)
     # Attempt 1.
     try:
         out = await generate(prompt)
         if _legal(req, out):
             return _respond(req, out)
-    except Exception:  # noqa: BLE001 — retry once below
-        pass
+    except Exception as exc:  # noqa: BLE001 — retry once below
+        log.warning("brain attempt 1 failed: %s", _err_summary(exc))
     # Retry once.
     try:
         out = await generate(prompt)
         if _legal(req, out):
             return _respond(req, out)
-    except Exception:  # noqa: BLE001 — fall through to rule-based fallback
-        pass
+    except Exception as exc:  # noqa: BLE001 — fall through to rule-based fallback
+        log.warning("brain attempt 2 failed: %s", _err_summary(exc))
     return stub_decide(req)
 
 

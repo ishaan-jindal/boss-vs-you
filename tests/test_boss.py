@@ -20,6 +20,7 @@ from bossfight.brain import BrainRequest
 def keyless(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
 
 
 # --- can_transform: every rejection carries a reason ---

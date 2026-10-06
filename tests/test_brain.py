@@ -19,6 +19,7 @@ from bossfight.safety import is_taunt_clean
 def keyless(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("DEEPINFRA_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
 
 
 def req(**kw) -> BrainRequest:
@@ -160,6 +161,107 @@ def test_retry_once_then_model_win(monkeypatch):
     assert out.next_form == "hollow"
     assert out.seq == 3
     assert len(calls) == 2
+
+
+def test_persistent_model_error_falls_back_to_stub_and_logs(monkeypatch, caplog):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    async def always_boom(prompt: str):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(brain_mod, "generate", always_boom)
+    with caplog.at_level("WARNING", logger="bossfight.brain"):
+        out = asyncio.run(decide(req()))
+    assert out.brain is False
+    assert out.tactics and all(v >= 0 for v in out.tactics.values())
+    assert "brain attempt 1 failed" in caplog.text
+    assert "brain attempt 2 failed" in caplog.text
+
+
+def test_err_summary_redacts_secrets_but_keeps_cause():
+    from bossfight.brain import _err_summary
+
+    out = _err_summary(
+        RuntimeError("gemini: Client error for url 'https://x/?key=SECRET123'")
+    )
+    assert "SECRET123" not in out
+    assert "key=…" in out
+    assert "Client error" in out
+
+
+def test_gemini_empty_reply_raises(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    async def fake_post(url: str, headers: dict, body: dict):
+        return providers.httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": "  "}]}}]},
+            request=providers.httpx.Request("POST", "http://test/"),
+        )
+
+    monkeypatch.setattr(providers, "_post", fake_post)
+    with pytest.raises(ValueError, match="empty reply"):
+        asyncio.run(providers.call_gemini("hi"))
+
+
+def test_gemini_thought_part_skipped(monkeypatch):
+    # Gemma 4 puts an empty thought part ahead of the answer part.
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    async def fake_post(url: str, headers: dict, body: dict):
+        return providers.httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "", "thought": True},
+                                {
+                                    "text": '{"tactics": {"pressure": 0.5, "bait": 0.3, "bombs": 0.2}, "next_form": "wraith", "transform_now": false, "taunt": "Kneel, hero.", "read": "r", "intensity": 0.7}'
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+            request=providers.httpx.Request("POST", "http://test/"),
+        )
+
+    monkeypatch.setattr(providers, "_post", fake_post)
+    out = asyncio.run(providers.call_gemini("hi"))
+    assert out.next_form == "wraith"
+    assert out.tactics["pressure"] == 0.5
+
+
+def test_gemini_raw_logged(monkeypatch, caplog):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+
+    async def fake_post(url: str, headers: dict, body: dict):
+        return providers.httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": '{"tactics": {"pressure": 1.0}, "next_form": "wraith", "taunt": "Kneel."}'
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"thoughtsTokenCount": 3},
+            },
+            request=providers.httpx.Request("POST", "http://test/"),
+        )
+
+    monkeypatch.setattr(providers, "_post", fake_post)
+    with caplog.at_level("INFO", logger="bossfight.providers"):
+        asyncio.run(providers.call_gemini("hi"))
+    assert "gemini raw:" in caplog.text
+    assert "Kneel." in caplog.text
 
 
 def test_model_taunt_blocked_falls_back(monkeypatch):

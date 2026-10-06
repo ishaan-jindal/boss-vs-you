@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 
 import httpx
 from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
 
 MAX_CONCURRENT = 3
 SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT)
@@ -54,9 +57,13 @@ def keys() -> tuple[str | None, str | None]:
     return os.environ.get("GEMINI_API_KEY"), os.environ.get("DEEPINFRA_API_KEY")
 
 
+def jev_key() -> str | None:
+    return os.environ.get("TYPESAFE_API_KEY")
+
+
 def stubbed() -> bool:
     g, d = keys()
-    return not (g or d)
+    return not (g or d or jev_key())
 
 
 def strip_fences(text: str) -> str:
@@ -115,7 +122,13 @@ async def call_gemini(prompt: str) -> BrainFields:
             "prompt": usage.get("promptTokenCount", 0),
         }
     )
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    parts = data["candidates"][0]["content"]["parts"]
+    # Gemma 4 returns a thought part (text + thought signature, empty text)
+    # ahead of the answer part: join every part's text, not just parts[0].
+    text = "".join(p.get("text", "") or "" for p in parts if isinstance(p, dict))
+    if not text.strip():
+        raise ValueError("gemini empty reply")
+    log.info("gemini raw: %s | usage=%s", text[:2000], dict(LAST_USAGE))
     return parse_fields(text)
 
 
@@ -131,6 +144,8 @@ async def call_deepinfra(prompt: str) -> BrainFields:
     resp.raise_for_status()
     data = resp.json()
     text = data["choices"][0]["message"]["content"]
+    if not text.strip():
+        raise ValueError("deepinfra empty reply")
     return parse_fields(text)
 
 

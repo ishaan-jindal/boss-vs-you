@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -20,6 +21,10 @@ STATIC_DIR = Path(
 
 
 def create_app() -> FastAPI:
+    # Our module loggers (bossfight.*) propagate to root, which defaults to
+    # WARNING: without a handler/level here, INFO lines (gemini raw, jev
+    # picks) never reach the terminal. LOG_LEVEL overrides, default INFO.
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
     app = FastAPI(title="Boss vs You")
     started = time.monotonic()
 
