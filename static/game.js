@@ -724,6 +724,7 @@ function startFight() {
   if (prev && prev.minions) for (const m of prev.minions) { try { arena.killProjectile('mx' + m.id); } catch { /* visual only */ } }
   setVignette(false);
   setBossChrome(cfg);
+  setBrainStatus(false); // no reply yet: fallback instincts until the model speaks
   $('hint-bar').classList.add('show');
   refreshPotions();
   showScreen('fight');
@@ -743,6 +744,19 @@ function setBossChrome(def) {
   $('boss-name').textContent = '◆ ' + (BOSS ? BOSS.name.toUpperCase() : 'THE THING') + ' — ' + def.name.toUpperCase();
   $('boss-name').style.color = css(def.colour);
   $('boss-name').style.textShadow = '0 0 14px ' + css(def.colour) + ', 2px 2px 0 #000';
+}
+
+/* Boss mind badge: who is driving — Gemma model or fallback instincts.
+ * Colour + sigil carry it, not just the words; the title says it plainly. */
+function setBrainStatus(on) {
+  const el = $('brain-status');
+  if (!el) return;
+  el.classList.toggle('possessed', !!on);
+  el.classList.toggle('dead', !on);
+  el.textContent = on ? '◉ POSSESSED' : '☠ DEAD SOUL';
+  el.title = on
+    ? 'Gemma model is driving the boss'
+    : 'Fallback instincts are driving the boss — model unreachable';
 }
 
 /* Transform set-piece: flash, crack/shudder, silhouette rebuild, fresh pool,
@@ -1024,6 +1038,7 @@ function applyBrain(out, ctx) {
   const seq = typeof out.seq === 'number' ? out.seq : ctx.seq;
   if (seq <= F.lastAppliedSeq) return; // stale reply — ignore
   F.lastAppliedSeq = seq;
+  setBrainStatus(out.brain === true);
   if (out.tactics && typeof out.tactics === 'object') {
     let total = 0;
     const w = {};

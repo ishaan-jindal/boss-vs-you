@@ -198,6 +198,24 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
 .hp-panel.boss { transform: rotate(0.8deg); }
 .hp-panel.you { transform: rotate(-0.8deg); }
 .hp-label { display: block; font-size: 14px; font-weight: 900; margin-bottom: 4px; color: var(--ink); }
+/* Boss mind: who is driving — the model or the fallback instincts. */
+.brain-status {
+  display: inline-block;
+  font-size: 11px; font-weight: 900; letter-spacing: 0.12em;
+  border: 2px solid var(--ink);
+  padding: 2px 8px; margin-bottom: 4px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.brain-status.dead { background: #3a3a3a; color: #cfc6b4; }
+.brain-status.possessed {
+  background: #2a0a4a; color: #d8b4fe; border-color: #a855f7;
+  box-shadow: 0 0 10px #a855f7;
+  animation: brain-pulse 1.6s ease-in-out infinite;
+}
+@keyframes brain-pulse {
+  0%, 100% { box-shadow: 0 0 4px #a855f7; }
+  50% { box-shadow: 0 0 14px #a855f7; }
+}
 .hpbar {
   position: relative;
   height: 20px;
@@ -490,6 +508,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
   .panel { padding: 18px 16px; }
   .hp-panel { min-width: 0; padding: 6px 8px; }
   .hp-label { font-size: 12px; }
+  .brain-status { font-size: 10px; padding: 1px 6px; }
   #cooldowns { display: none; }
   #fight-btns { width: 200px; height: 200px; }
 }
@@ -498,6 +517,7 @@ button:focus-visible { outline: 4px solid var(--danger); outline-offset: 2px; }
   #bv-vignette { transition: none; }
   #bv-flash.hit { animation: none; opacity: 0; }
   #bv-banner.show { animation: none; opacity: 1; transform: translate(-50%, -50%) rotate(0) scale(1); }
+  .brain-status.possessed { animation: none; box-shadow: none; }
   .panel, .boss-card, .big-btn, .hp-panel, #hint-bar, .stat-card { transform: none !important; }
   .pop { animation: pop-static 0.6s ease-out forwards; }
 }
