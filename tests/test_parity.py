@@ -85,13 +85,9 @@ def test_boss_hp_offset_matches_python_at_descent_one():
 def test_boss_speed_matches_and_respects_cap():
     base = 170.0
     for descent in (0, 1, 5, 30, 200):
-        assert (
-            js_boss_speed(
-                base, descent, b.BOSS_SPEED_GROWTH_PER_LEVEL, b.BOSS_SPEED_CAP_PX_S
-            )
-            == min(round(b.boss_speed(descent, base), 6), b.BOSS_SPEED_CAP_PX_S)
-            or True
-        )
+        assert js_boss_speed(
+            base, descent, b.BOSS_SPEED_GROWTH_PER_LEVEL, b.BOSS_SPEED_CAP_PX_S
+        ) == b.boss_speed(descent, base), f"descent={descent}"
     # The cap is the invariant that matters: the boss must never outrun the player.
     assert b.boss_speed(500, base) == b.BOSS_SPEED_CAP_PX_S
 
@@ -104,12 +100,21 @@ def test_payload_carries_every_mirrored_constant():
         "boss_dmg_growth_per_level",
         "boss_speed_growth_per_level",
         "boss_speed_cap_px_s",
+        "room_boss_hp_mult",
+        "minion_cap",
+        "minion_base",
         "exp_threshold_present",
     ):
         if key == "exp_threshold_present":
             assert "xp_threshold" in s
         else:
             assert key in s, f"{key} missing from /api/balance payload"
+
+    assert s["room_boss_hp_mult"] == b.room_boss_hp_mult(0)
+    assert s["minion_cap"] == b.MINION_CAP
+    for kind in ("chaser", "lobber"):
+        assert s["minion_base"][kind]["hp"] == b.MINION_BASE_HP[kind]
+        assert s["minion_base"][kind]["xp"] == b.MINION_BASE_EXP[kind]
 
     assert s["xp_threshold"]["base"] == b.EXP_BASE_LEVEL1
     assert s["xp_threshold"]["growth"] == b.EXP_GROWTH

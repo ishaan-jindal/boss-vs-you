@@ -213,7 +213,7 @@ def descent_gain(fight_secs: float, hp_left_pct: float, descent: int) -> int:
     """Governor increment (+1..+3 per kill): fast + clean climbs, scrappy wins
     still advance. Zero/negative fight time is treated as maximally fast
     (capped by the clamp, so it cannot overshoot)."""
-    par = 90.0 + 4.0 * max(0, descent)
+    par = DESCENT_PAR_BASE_S + DESCENT_PAR_PER_DESCENT_S * max(0, descent)
     speed = 1.0 if fight_secs <= 0 else clamp(par / fight_secs, 0.0, 1.0)
     clean = clamp(hp_left_pct / 100.0, 0.0, 1.0)
     # math.floor(x + 0.5) = JS Math.round for non-negative x (py round() banks).
@@ -231,6 +231,9 @@ def ttk_seconds(descent: int, build: list[str]) -> float:
 # fns below are the server-side source the tests pin down.
 MINION_BASE_HP: dict[str, float] = {"chaser": 20.0, "lobber": 14.0}
 MINION_BASE_EXP: dict[str, int] = {"chaser": 8, "lobber": 10}
+# Mirrors bosses.MINION_CAP (same one-copy-here-one-in-the-roster split as
+# the HP table above): the most adds ever live, bounding the damage budget.
+MINION_CAP = 5
 
 
 def minion_exp(kind: str) -> int:
@@ -313,4 +316,13 @@ def balance_summary() -> dict:
             "attack_cooldown_s": PLAYER_BASE_ATTACK_COOLDOWN_S,
         },
         "boss_base_hp": BOSS_BASE_HP,
+        # Room-clear numbers the client reads instead of hardcoding: boss
+        # pool multiplier (roomMult) plus the minion base/cap behind
+        # MINION_BASE / MINION_CAP in game.js.
+        "room_boss_hp_mult": room_boss_hp_mult(0),
+        "minion_cap": MINION_CAP,
+        "minion_base": {
+            kind: {"hp": hp, "xp": MINION_BASE_EXP[kind]}
+            for kind, hp in MINION_BASE_HP.items()
+        },
     }
