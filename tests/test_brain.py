@@ -110,7 +110,6 @@ def _fields(**kw):
         tactics={"pressure": 0.5, "bait": 0.3, "bombs": 0.2},
         next_form="wraith",
         transform_now=True,
-        open_with="shadow-lunge",
         taunt="You bled on my floor, hero. Bleed again.",
         read="you trade hits; it will armour up",
         intensity=0.7,
@@ -144,7 +143,6 @@ def test_transform_now_passes_through(monkeypatch):
     _modelled(monkeypatch, _fields(transform_now=True))
     out = asyncio.run(decide(req(descent=5)))
     assert out.transform_now is True
-    assert out.open_with == "shadow-lunge"
     assert out.seq == 0
 
 

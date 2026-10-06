@@ -28,7 +28,6 @@ def test_stub_spawn_floor():
     empty = BrainRequest(boss_id=bosses.BOSS_ID, minions_alive=0)
     out = stub_decide(empty)
     assert out.spawn_call is True
-    assert out.minion_pressure == 0.5
     full = BrainRequest(boss_id=bosses.BOSS_ID, minions_alive=5)
     assert stub_decide(full).spawn_call is False
 

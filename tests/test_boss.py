@@ -148,7 +148,6 @@ def _fields(**kw):
         tactics={"pressure": 0.5, "bait": 0.3, "bombs": 0.2},
         next_form="wraith",
         transform_now=True,
-        open_with="blink",
         taunt="You bled on my floor, hero. Bleed again.",
         read="you turtle; it will hold ground",
         intensity=0.7,

@@ -47,18 +47,14 @@ class BrainResponse(BaseModel):
     tactics: dict[str, float]  # weights, non-empty, values >= 0
     next_form: str  # one of bosses.FORMS
     transform_now: bool = False
-    open_with: str = ""  # attack id or tactic id, may be ""
     taunt: str  # <= 140 chars, blocklist-checked
     read: str = ""  # <= 200 chars, the boss's read on the player
     intensity: float = 0.7
-    # Room-clear orders (all optional, additive): spawn_call asks the
-    # client to spawn one add (client clamps to MINION_CAP), pressure
-    # biases how urgently, attack_id names the attack to open with,
-    # minions_alive echoes the request count for debugging.
+    # Room-clear order (optional, additive): spawn_call asks the client to
+    # spawn one add (client clamps to MINION_CAP); minions_alive echoes the
+    # request count for debugging.
     minions_alive: int = 0
     spawn_call: bool = False
-    minion_pressure: float = 0.0
-    attack_id: str | None = None
 
 
 # Stub taunts for the one immortal boss (all clean, grim dungeon register).
@@ -147,14 +143,12 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
         transform_now = ok
     else:
         transform_now = False
-    open_with = max(TACTIC_KEYS, key=lambda k: tactics[k])
     taunts = STUB_TAUNTS.get(req.boss_id, [DEFAULT_TAUNT])
     taunt = taunts[req.seq % len(taunts)]
     intensity = 0.85 if req.boss_hp_pct < 30 else (0.7 if heat >= 0.5 else 0.55)
     # Spawn floor: keep ~2 adds live so the room has pressure without
-    # swarming; the client clamps to MINION_CAP regardless. Pressure is a
-    # flat 0.5 (mid) — the stub holds tempo, it never spikes.
-    # ponytail: flat count/pressure ceiling; scale with descent/heat if
+    # swarming; the client clamps to MINION_CAP regardless.
+    # ponytail: flat count ceiling; scale with descent/heat if
     # rooms ever feel empty at depth.
     alive = max(0, req.minions_alive)
     return BrainResponse(
@@ -162,14 +156,11 @@ def stub_decide(req: BrainRequest) -> BrainResponse:
         tactics=tactics,
         next_form=next_form,
         transform_now=transform_now,
-        open_with=open_with,
         taunt=taunt,
         read=read,
         intensity=intensity,
         minions_alive=alive,
         spawn_call=alive < 2,
-        minion_pressure=0.5,
-        attack_id=req.attack_id,
     )
 
 
@@ -208,12 +199,12 @@ def build_prompt(req: BrainRequest) -> str:
         "Return tactic WEIGHTS (keys pressure/bait/bombs, values >= 0) biasing "
         "how it hunts this hero, the body it should wear next, whether to take "
         "that body NOW mid-fight (true only to punish something you just saw) "
-        "or on return, what to open with, a grim taunt "
+        "or on return, a grim taunt "
         f"(≤{MAX_TAUNT_LEN} chars) naming what just happened, and your read on "
         f"the hero (≤{MAX_READ_LEN} chars). "
         'Reply ONLY with JSON: {"tactics": {"pressure": 0.0-1.0, "bait": 0.0-1.0, '
         '"bombs": 0.0-1.0}, "next_form": "...", "transform_now": false, '
-        '"open_with": "...", "taunt": "...", "read": "...", "intensity": 0.0-1.0}.'
+        '"taunt": "...", "read": "...", "intensity": 0.0-1.0}.'
     )
 
 
@@ -257,14 +248,11 @@ def _respond(req: BrainRequest, out) -> BrainResponse:
         tactics=tactics,
         next_form=next_form,
         transform_now=transform_now,
-        open_with=out.open_with or "",
         taunt=out.taunt,
         read=out.read or "",
         intensity=out.intensity,
         minions_alive=max(0, req.minions_alive),
         spawn_call=bool(getattr(out, "spawn_call", False)),
-        minion_pressure=_clamp01(getattr(out, "minion_pressure", 0.0) or 0.0),
-        attack_id=getattr(out, "attack_id", None) or req.attack_id,
     )
 
 
