@@ -119,6 +119,27 @@ def test_payload_carries_every_mirrored_constant():
     assert s["xp_threshold"]["base"] == b.EXP_BASE_LEVEL1
     assert s["xp_threshold"]["growth"] == b.EXP_GROWTH
     assert s["xp_threshold"]["mode"] == "compound"
+    assert s["player_base"]["special_dmg"] == b.PLAYER_BASE_SPECIAL_DMG
+    assert s["cards"]["edge"]["special_dmg"] == b.EDGE_DMG
+    assert s["cards"]["edge"]["special_dmg_tier2"] == b.EDGE_DMG_TIER2
     assert s["descent_par"]["par_base_s"] == b.DESCENT_PAR_BASE_S
     assert s["descent_par"]["par_per_descent_s"] == b.DESCENT_PAR_PER_DESCENT_S
     assert s["descent_par"]["xp_time_cap_s"] == b.EXP_CAP_SECS
+
+
+def test_edge_boosts_melee_and_special_equally():
+    """One Edge bonus, both buttons: the same per-card value lands on melee
+    and special, tiering at the same descent."""
+    for descent in (1, 11, 12, 30):
+        per = b.EDGE_DMG_TIER2 if descent >= b.TIER2_DESCENT else b.EDGE_DMG
+        for n in (0, 1, 4):
+            build = ["Edge"] * n
+            assert (
+                b.player_melee_dmg(build, descent) == b.PLAYER_BASE_MELEE_DMG + per * n
+            )
+            assert b.player_special_dmg(build, descent) == (
+                b.PLAYER_BASE_SPECIAL_DMG + per * n
+            )
+            assert b.player_special_dmg(build, descent) - b.PLAYER_BASE_SPECIAL_DMG == (
+                b.player_melee_dmg(build, descent) - b.PLAYER_BASE_MELEE_DMG
+            )

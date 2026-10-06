@@ -34,6 +34,7 @@ BOSS_SPEED_CAP_PX_S = 200.0  # player runs ~220 px/s; the boss never outruns
 # --- Player base kit (fixed by spec) ---
 PLAYER_BASE_HP = 100.0
 PLAYER_BASE_MELEE_DMG = 8.0
+PLAYER_BASE_SPECIAL_DMG = 25.0
 PLAYER_BASE_ATTACK_COOLDOWN_S = 0.6
 
 # --- Card effects ---
@@ -48,6 +49,7 @@ MARROW_DASH_CD_REDUCTION_S = 0.5
 STONE_SKIN_REDUCTION = 1
 DAMAGE_TAKEN_FLOOR = 1
 BLOODLUST_EXP_MULT = 1.4
+BLOODLUST_MAX_STACK = 3  # linear stacks past this earn nothing extra
 BLOODLUST_HP_PENALTY = 8
 TIER2_DESCENT = 12  # from here Edge -> +5, Vigour -> +40
 
@@ -119,6 +121,15 @@ def player_melee_dmg(build: list[str], descent: int) -> float:
     return PLAYER_BASE_MELEE_DMG + (EDGE_DMG_TIER2 if _tier2(descent) else EDGE_DMG) * n
 
 
+def player_special_dmg(build: list[str], descent: int) -> float:
+    # Edge lands the same value on special as on melee (one bonus, both
+    # buttons); no separate per-card constant to tune.
+    n = count_cards(build)["edge"]
+    return (
+        PLAYER_BASE_SPECIAL_DMG + (EDGE_DMG_TIER2 if _tier2(descent) else EDGE_DMG) * n
+    )
+
+
 def player_attack_cooldown(build: list[str]) -> float:
     # Multiplicative precisely so no card count can drive this negative
     # (flat -0.8s on a 0.6s base = infinite DPS); the floor caps DPS at 2x.
@@ -140,7 +151,8 @@ def player_max_hp(build: list[str], descent: int) -> float:
 
 
 def player_dps(build: list[str], descent: int) -> float:
-    # Sustained melee only: special burst is uptime-gated, not analytic.
+    # Sustained melee only: special burst is uptime-gated, not analytic, so
+    # the Edge-on-special bonus never enters the crossover math.
     return player_melee_dmg(build, descent) / player_attack_cooldown(build)
 
 
@@ -172,15 +184,17 @@ def exp_grant(
     level: int,
     descent: int,
     killed: bool,
-    bloodlust: bool,
+    lust_n: int = 0,
 ) -> int:
     """EXP for one fight: base threshold x a performance factor in
-    [0.60, 0.90], +25% of base on kill, x1.4 with Bloodlust, capped at one
-    full threshold so a fight can never grant multiple levels at once.
+    [0.60, 0.90], +25% of base on kill, +40% per Bloodlust card up to 3
+    stacks (linear, never compounding), capped at one full threshold so a
+    fight can never grant multiple levels at once.
     Performance blends time survived (capped at 90s, so idling past the cap
     earns nothing extra) with damage efficiency (dealt share of total damage
     exchanged, so huge raw numbers saturate instead of farming levels). All
-    inputs are guarded, never trusted."""
+    inputs are guarded, never trusted. A legacy True/False still reads as
+    exactly 1/0 stacks (bool is int)."""
     secs = max(0.0, fight_secs)
     dealt = max(0.0, damage_dealt)
     absorbed = max(0.0, damage_absorbed)
@@ -202,8 +216,9 @@ def exp_grant(
         # grant: a max-performance kill can reach 1.15x threshold before the
         # one-threshold cap below pulls it back to 1.0x.
         grant += EXP_KILL_BONUS * base
-    if bloodlust:
-        grant *= BLOODLUST_EXP_MULT
+    if lust_n:
+        n = max(0, min(int(lust_n), BLOODLUST_MAX_STACK))
+        grant *= 1.0 + (BLOODLUST_EXP_MULT - 1.0) * n
     grant = min(max(0.0, grant), float(base))
     # math.floor(x + 0.5) = JS Math.round for non-negative x (py round() banks).
     return int(math.floor(grant + 0.5))
@@ -291,7 +306,12 @@ def balance_summary() -> dict:
             "xp_time_cap_s": EXP_CAP_SECS,
         },
         "cards": {
-            "edge": {"melee_dmg": EDGE_DMG, "melee_dmg_tier2": EDGE_DMG_TIER2},
+            "edge": {
+                "melee_dmg": EDGE_DMG,
+                "melee_dmg_tier2": EDGE_DMG_TIER2,
+                "special_dmg": EDGE_DMG,
+                "special_dmg_tier2": EDGE_DMG_TIER2,
+            },
             "vigour": {"max_hp": VIGOUR_HP, "max_hp_tier2": VIGOUR_HP_TIER2},
             "swiftness": {
                 "cooldown_mult": SWIFTNESS_MULT,
@@ -307,12 +327,14 @@ def balance_summary() -> dict:
             },
             "bloodlust": {
                 "exp_mult": BLOODLUST_EXP_MULT,
+                "max_stack": BLOODLUST_MAX_STACK,
                 "max_hp_penalty": BLOODLUST_HP_PENALTY,
             },
         },
         "player_base": {
             "max_hp": PLAYER_BASE_HP,
             "melee_dmg": PLAYER_BASE_MELEE_DMG,
+            "special_dmg": PLAYER_BASE_SPECIAL_DMG,
             "attack_cooldown_s": PLAYER_BASE_ATTACK_COOLDOWN_S,
         },
         "boss_base_hp": BOSS_BASE_HP,

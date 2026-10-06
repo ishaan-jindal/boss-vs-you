@@ -51,15 +51,32 @@ def test_exp_grant_time_capped_idling_earns_nothing_extra():
 
 
 def test_exp_grant_bloodlust():
-    plain = bal.exp_grant(0, 0, 0, 1, 1, False, False)
-    lust = bal.exp_grant(0, 0, 0, 1, 1, False, True)
+    plain = bal.exp_grant(0, 0, 0, 1, 1, False, 0)
+    lust = bal.exp_grant(0, 0, 0, 1, 1, False, 1)
     assert lust == math.floor(plain * bal.BLOODLUST_EXP_MULT + 0.5)
+    # Legacy bool still reads as exactly one stack (True == 1).
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, True) == lust
+
+
+def test_exp_grant_bloodlust_linear_then_capped():
+    plain = bal.exp_grant(0, 0, 0, 1, 1, False, 0)
+    step = plain * (bal.BLOODLUST_EXP_MULT - 1)
+    # One stack adds a linear step, not a compounding multiply.
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, 1) == math.floor(plain + step + 0.5)
+    # Two-plus stacks would pass the threshold, so the one-level cap binds.
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, 2) == bal.exp_to_next(1)
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, 3) == bal.exp_to_next(1)
+    # Past the stack cap extra cards earn nothing; negatives count as zero.
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, 10) == bal.exp_grant(
+        0, 0, 0, 1, 1, False, 3
+    )
+    assert bal.exp_grant(0, 0, 0, 1, 1, False, -2) == plain
 
 
 def test_exp_grant_never_more_than_one_threshold():
     for lvl in (1, 5, 10, 20):
         base = bal.exp_to_next(lvl)
-        g = bal.exp_grant(10_000, 1e9, 0, lvl, 30, True, True)
+        g = bal.exp_grant(10_000, 1e9, 0, lvl, 30, True, 10)
         assert 0 <= g <= base
 
 
@@ -87,6 +104,7 @@ def test_balance_endpoint_exposes_exp_keys():
     assert body["exp_growth"] == bal.EXP_GROWTH
     assert body["exp_kill_bonus"] == bal.EXP_KILL_BONUS
     assert body["exp_cap_secs"] == bal.EXP_CAP_SECS
+    assert body["cards"]["bloodlust"]["max_stack"] == bal.BLOODLUST_MAX_STACK
     assert len(body["cards"]) == 6
 
 

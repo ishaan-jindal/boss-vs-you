@@ -1521,14 +1521,16 @@ function resetEnrage() {
  * there is no one left to spend it — and idling past the cap gains nothing. */
 function expMult() {
   const n = (F && F.build ? F.build.filter((c) => c === 'bloodlust').length : 0);
-  return Math.pow(balNum(['cards', 'bloodlust', 'exp_mult'], 1.4), n);
+  const m = balNum(['cards', 'bloodlust', 'exp_mult'], 1.4);
+  const cap = balNum(['cards', 'bloodlust', 'max_stack'], 3);
+  return 1 + (m - 1) * Math.min(Math.max(0, n), cap);
 }
 function grantKillXp(fightSecs) {
   const S = F.stats;
   const t = xpThreshold(S.level);
   const cap = (BAL && BAL.descent_par && Number(BAL.descent_par.time_cap_s)) || XP_TIME_CAP_FALLBACK_S;
   const frac = 0.6 + 0.3 * (Math.min(Math.max(0, fightSecs), cap) / cap);
-  S.xp += Math.round(t * frac * 1.25 * expMult());
+  S.xp += Math.min(Math.round(t * frac * 1.25 * expMult()), t);
 }
 
 /* The six cards (ids match GET /api/balance's card table; stone_skin with
@@ -1547,7 +1549,7 @@ function cardFx(id, descent) {
   const cards = (BAL && BAL.cards) || {};
   const num = (obj, k, fb) => { const n = Number(obj && obj[k]); return isFinite(n) ? n : fb; };
   if (id === 'vigour') { const v = num(cards.vigour, deep ? 'max_hp_tier2' : 'max_hp', deep ? 40 : 25); return '+' + v + ' max HP, healed at once'; }
-  if (id === 'edge') { const v = num(cards.edge, deep ? 'melee_dmg_tier2' : 'melee_dmg', deep ? 5 : 3); return '+' + v + ' melee damage'; }
+  if (id === 'edge') { const v = num(cards.edge, deep ? 'melee_dmg_tier2' : 'melee_dmg', deep ? 5 : 3); return '+' + v + ' melee + special damage'; }
   if (id === 'swiftness') { const m = num(cards.swiftness, 'cooldown_mult', 0.9), f = num(cards.swiftness, 'cooldown_floor_s', 0.3); return 'attack cooldown ×' + m + ' (floor ' + f + 's)'; }
   if (id === 'marrow') { const c = num(cards.marrow, 'dash_charges', 1), r = num(cards.marrow, 'dash_cd_reduction_s', 0.5); return '+' + c + ' dash charge, −' + r + 's refill'; }
   if (id === 'stone_skin') { const v = num(cards.stone_skin, 'dmg_reduction', 1), f = num(cards.stone_skin, 'dmg_taken_floor', 1); return '−' + v + ' damage taken (floor ' + f + ')'; }
@@ -1611,6 +1613,7 @@ function applyCard(id, descent) {
     S.maxHp += v; S.hp = Math.min(S.maxHp, S.hp + v); // heals the difference
   } else if (id === 'edge') {
     S.damage += num(cards.edge, deep ? 'melee_dmg_tier2' : 'melee_dmg', deep ? 5 : 3);
+    S.specialDmg += num(cards.edge, deep ? 'special_dmg_tier2' : 'special_dmg', deep ? 5 : 3);
   } else if (id === 'swiftness') {
     const floor = num(cards.swiftness, 'cooldown_floor_s', 0.3);
     S.attackCd = Math.max(floor, S.attackCd * num(cards.swiftness, 'cooldown_mult', 0.9)); // multiplicative: never negative
